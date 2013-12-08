@@ -246,16 +246,19 @@ let plug_inner id =
            evtchn; mac; backend; features; 
          }
 
-let plug id =
+let connect id =
+  printf "Netif: connect\n";
   lwt transport = plug_inner id in
   let t = {t=transport; resume_fns=[]; l=Lwt_mutex.create (); c=Lwt_condition.create () } in
   Hashtbl.add devices id t;
-  return t
+  return (`Ok t)
 
 (* Unplug shouldn't block, although the Xen one might need to due
    to Xenstore? XXX *)
-let unplug id =
-  Hashtbl.remove devices id
+let disconnect t =
+  printf "Netif: disconnect\n%!";
+  Hashtbl.remove devices (id t);
+  return ()
 
 let notify nf () =
   Eventchn.notify h nf.evtchn
@@ -441,9 +444,7 @@ type callback = id -> t -> unit Lwt.t
 
 let create () =
   lwt ids = enumerate () in
-  Lwt.catch
-    (fun () -> Lwt_list.map_p plug ids)
-    (fun exn  -> Hashtbl.iter (fun id _ -> unplug id) devices; Lwt.fail exn)
+  Lwt_list.map_p connect ids
 
 (* The Xenstore MAC address is colon separated, very helpfully *)
 let mac nf = nf.t.mac
