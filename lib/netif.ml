@@ -18,6 +18,18 @@ open Lwt
 open Printf
 open OS
 
+type 'a io = 'a Lwt.t
+type page_aligned_buffer = Io_page.t
+type buffer = Cstruct.t
+type macaddr = Macaddr.t
+
+(** IO operation errors *)
+type error = [
+  | `Unknown of string (** an undiagnosed error *)
+  | `Unimplemented     (** operation not yet implemented in the code *)
+  | `Disconnected      (** the device has been previously disconnected *)
+]
+
 let allocate_ring ~domid =
   let page = Io_page.get 1 in
   let x = Io_page.to_cstruct page in
@@ -386,20 +398,12 @@ let listen nf fn =
     tx_poll t;
     (* Evtchn.notify nf.t.evtchn; *)
     lwt (event, new_t) =
-      try_lwt
         lwt event = Activations.after t.evtchn event in
         return (event, t)
-      with
-      | Generation.Invalid ->
-        printf "Waiting for plug in listen\n";
-        wait_for_plug nf 
-        >>= fun () ->
-        printf "Waiting for plug in listen\n";
-        return (Activations.program_start, nf.t)
     in poll_t event new_t
   in
   poll_t Activations.program_start nf.t
-
+  
 (** Return a list of valid VIFs *)
 let enumerate () =
   Xs.make () >>= fun xsc ->
