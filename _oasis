@@ -1,0 +1,15 @@
+OASISFormat: 0.3
+Name:        mirage-net-xen
+Version:     0.9.0
+Synopsis:    Xen network frontend driver implementation
+Authors:     Anil Madhavapeddy, David Scott
+License:     ISC
+Plugins:     META (0.3), DevFiles (0.3)
+BuildTools:  ocamlbuild
+
+Library "mirage-net-xen"
+  CompiledObject:     best
+  Path:               lib
+  Findlibname:        mirage-net-xen
+  Modules:            Netif
+  BuildDepends:       cstruct, cstruct.syntax, ipaddr, mirage-xen
