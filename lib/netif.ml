@@ -440,12 +440,6 @@ let create () =
 (* The Xenstore MAC address is colon separated, very helpfully *)
 let mac nf = nf.t.mac
 
-(* Get write buffer for Netif output *)
-let get_writebuf t =
-  let page = Io_page.get 1 in
-  (* TODO: record statistics for requesting thread here (in debug mode?) *)
-  return (Cstruct.of_bigarray page)
-
 let get_stats_counters t = t.t.stats
 
 let reset_stats_counters t =
