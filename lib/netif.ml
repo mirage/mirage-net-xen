@@ -239,9 +239,12 @@ let plug_inner id =
   Printf.printf " sg:%b gso_tcpv4:%b rx_copy:%b rx_flip:%b smart_poll:%b\n"
     features.sg features.gso_tcpv4 features.rx_copy features.rx_flip features.smart_poll;
   Eventchn.unmask h evtchn;
+  let stats = { rx_pkts=0l;rx_bytes=0L;tx_pkts=0l;tx_bytes=0L } in
   (* Register callback activation *)
-  return { id; backend_id; tx_fring; tx_client; tx_gnt; tx_mutex; rx_gnt; rx_fring; rx_client; rx_map;
-           evtchn; mac; backend; features; stats={rx_pkts=0l;rx_bytes=0L;tx_pkts=0l;tx_bytes=0L;};}
+  return { id; backend_id; tx_fring; tx_client; tx_gnt; tx_mutex; 
+           rx_gnt; rx_fring; rx_client; rx_map; stats;
+           evtchn; mac; backend; features; 
+         }
 
 let plug id =
   lwt transport = plug_inner id in
@@ -398,25 +401,30 @@ let listen nf fn =
     tx_poll t;
     (* Evtchn.notify nf.t.evtchn; *)
     lwt (event, new_t) =
-        lwt event = Activations.after t.evtchn event in
-        return (event, t)
+      lwt event = Activations.after t.evtchn event in
+      return (event, t)
     in poll_t event new_t
   in
   poll_t Activations.program_start nf.t
-  
+
 (** Return a list of valid VIFs *)
 let enumerate () =
-  Xs.make () >>= fun xsc ->
-  Lwt.catch
-    (fun () -> Xs.(immediate xsc (fun h -> directory h "device/vif")) >|= (List.map int_of_string) )
-    (fun _ -> Lwt.return [])
+  Xs.make ()
+  >>= fun xsc ->
+  catch
+    (fun () -> 
+       Xs.(immediate xsc 
+             (fun h -> directory h "device/vif")) 
+       >|= (List.map int_of_string) )
+    (fun _ -> return [])
 
 let resume (id,t) =
   lwt transport = plug_inner id in
   let old_transport = t.t in
   t.t <- transport;
   lwt () = Lwt_list.iter_s (fun fn -> fn t) t.resume_fns in
-  lwt () = Lwt_mutex.with_lock t.l (fun () -> Lwt_condition.broadcast t.c (); return ()) in
+  lwt () = Lwt_mutex.with_lock t.l
+      (fun () -> Lwt_condition.broadcast t.c (); return ()) in
   Lwt_ring.Front.shutdown old_transport.rx_client;
   Lwt_ring.Front.shutdown old_transport.tx_client;
   return ()
