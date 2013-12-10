@@ -1,5 +1,5 @@
 (*
- * Copyright (c) 2010-2011 Anil Madhavapeddy <anil@recoil.org>
+ * Copyright (c) 2010-2013 Anil Madhavapeddy <anil@recoil.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -171,12 +171,9 @@ type t = {
   c : unit Lwt_condition.t;
 }
 
-type id = int
+type id = string
 
-let id_of_string = int_of_string
-let string_of_id = string_of_int
-
-let id t = t.t.id
+let id t = string_of_int t.t.id
 let backend_id t = t.t.backend_id
 
 let devices : (id, t) Hashtbl.t = Hashtbl.create 1
@@ -246,18 +243,66 @@ let plug_inner id =
            evtchn; mac; backend; features; 
          }
 
+(** Set of active block devices *)
+let devices : (int, t) Hashtbl.t = Hashtbl.create 1
+
+let devices_waiters : (int, t Lwt.u Lwt_sequence.t) Hashtbl.t = Hashtbl.create 1
+
+(** Return a list of valid VIFs *)
+let enumerate () =
+  lwt xs = Xs.make () in
+  try_lwt
+    Xs.(immediate xs (fun h -> directory h "device/vif"))
+  with
+  | Xs_protocol.Enoent _ ->
+    return []
+  | e ->
+    printf "Netif.enumerate caught exception: %s\n" (Printexc.to_string e);
+    return []
+
 let connect id =
-  printf "Netif: connect\n";
-  lwt transport = plug_inner id in
-  let t = {t=transport; resume_fns=[]; l=Lwt_mutex.create (); c=Lwt_condition.create () } in
-  Hashtbl.add devices id t;
-  return (`Ok t)
+  (* If [id] is an integer, use it. Otherwise default to the first
+     available disk. *)
+  lwt id' =
+    let id = try Some (int_of_string id) with _ -> None in
+    match id with 
+    | Some id -> 
+      return (Some id)
+    | None -> 
+      enumerate ()
+      >>= function
+      | [] -> return None 
+      | hd::_ -> return (Some (int_of_string hd))
+  in
+  match id' with
+  | Some id' -> begin
+      if Hashtbl.mem devices id' then
+        return (`Ok (Hashtbl.find devices id'))
+      else begin
+        printf "Netif.connect %d\n%!" id';
+        try_lwt
+          lwt t = plug_inner id' in
+          let l = Lwt_mutex.create () in
+          let c = Lwt_condition.create () in
+          let dev = { t; resume_fns=[]; l; c } in
+          Hashtbl.add devices id' dev;
+          return (`Ok dev)
+        with exn ->
+          return (`Error (`Unknown (Printexc.to_string exn)))
+      end
+    end
+  | None ->
+    lwt all = enumerate () in
+    printf "Netif.connect %s: could not find device\n" id;
+    return (`Error (`Unknown
+                      (Printf.sprintf "device %s not found (available = [ %s ])"
+                         id (String.concat ", " all))))
 
 (* Unplug shouldn't block, although the Xen one might need to due
    to Xenstore? XXX *)
 let disconnect t =
   printf "Netif: disconnect\n%!";
-  Hashtbl.remove devices (id t);
+  Hashtbl.remove devices t.t.id;
   return ()
 
 let notify nf () =
@@ -441,10 +486,6 @@ let add_resume_hook t fn =
 
 (* Type of callback functions for [create]. *)
 type callback = id -> t -> unit Lwt.t
-
-let create () =
-  lwt ids = enumerate () in
-  Lwt_list.map_p connect ids
 
 (* The Xenstore MAC address is colon separated, very helpfully *)
 let mac nf = nf.t.mac
