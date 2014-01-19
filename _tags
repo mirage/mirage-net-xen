@@ -1,7 +1,7 @@
 # OASIS_START
-# DO NOT EDIT (digest: 8c771b8ff7cac08577092e4656946b1b)
-# Ignore VCS directories, you can use the same kind of rule outside 
-# OASIS_START/STOP if you want to exclude directories that contains 
+# DO NOT EDIT (digest: 70e731acd74517f4ad414eccaf732720)
+# Ignore VCS directories, you can use the same kind of rule outside
+# OASIS_START/STOP if you want to exclude directories that contains
 # useless stuff for the build process
 <**/.svn>: -traverse
 <**/.svn>: not_hygienic
@@ -19,6 +19,8 @@
 <lib/*.ml{,i}>: pkg_cstruct.syntax
 <lib/*.ml{,i}>: pkg_ipaddr
 <lib/*.ml{,i}>: pkg_mirage-xen
+<lib/*.ml{,i}>: pkg_xen-grant
+<lib/*.ml{,i}>: pkg_xen-event
 # OASIS_STOP
 true: annot, bin_annot, debug
 true: syntax_camlp4o, pkg_lwt.syntax
