@@ -1,6 +1,6 @@
 OASISFormat: 0.3
 Name:        mirage-net-xen
-Version:     0.9.0
+Version:     1.0.0
 Synopsis:    Xen network frontend driver implementation
 Authors:     Anil Madhavapeddy, David Scott
 License:     ISC
@@ -12,4 +12,4 @@ Library "mirage-net-xen"
   Path:               lib
   Findlibname:        mirage-net-xen
   Modules:            Netif
-  BuildDepends:       cstruct, cstruct.syntax, ipaddr, mirage-xen
+  BuildDepends:       cstruct, cstruct.syntax, ipaddr, mirage-xen, io-page
