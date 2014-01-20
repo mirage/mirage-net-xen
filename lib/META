@@ -1,8 +1,8 @@
 # OASIS_START
-# DO NOT EDIT (digest: e63d1c81449a750e2ba65cccf1400d51)
+# DO NOT EDIT (digest: f91edd16120dc89634c5096cc9996cad)
 version = "1.0.0"
 description = "Xen network frontend driver implementation"
-requires = "cstruct cstruct.syntax ipaddr mirage-xen io-page"
+requires = "cstruct cstruct.syntax ipaddr mirage-xen xen-grant xen-event"
 archive(byte) = "mirage-net-xen.cma"
 archive(byte, plugin) = "mirage-net-xen.cma"
 archive(native) = "mirage-net-xen.cmxa"

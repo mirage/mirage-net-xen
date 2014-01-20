@@ -37,7 +37,7 @@ let allocate_ring ~domid =
   for i = 0 to Cstruct.len x - 1 do
     Cstruct.set_uint8 x i 0
   done;
-  Gnt.Gntshr.grant_access ~domid ~writeable:true gnt page;
+  Gnt.Gntshr.grant_access ~domid ~writable:true gnt page;
   return (gnt, x)
 
 module RX = struct
@@ -316,7 +316,7 @@ let refill_requests nf =
     List.iter
       (fun (gref, page) ->
          let id = gref mod (1 lsl 16) in
-         Gnt.Gntshr.grant_access ~domid:nf.backend_id ~writeable:true gref page;
+         Gnt.Gntshr.grant_access ~domid:nf.backend_id ~writable:true gref page;
          Hashtbl.add nf.rx_map id (gref, page);
          let slot_id = Ring.Rpc.Front.next_req_id nf.rx_fring in
          let slot = Ring.Rpc.Front.slot nf.rx_fring slot_id in
@@ -353,7 +353,7 @@ let write_request ?size ~flags nf page =
   lwt gref = Gnt.Gntshr.get () in
   (* This grants access to the *base* data pointer of the page *)
   (* XXX: another place where we peek inside the cstruct *)
-  Gnt.Gntshr.grant_access ~domid:nf.t.backend_id ~writeable:false gref page.Cstruct.buffer;
+  Gnt.Gntshr.grant_access ~domid:nf.t.backend_id ~writable:false gref page.Cstruct.buffer;
   let size = match size with |None -> Cstruct.len page |Some s -> s in
   (* XXX: another place where we peek inside the cstruct *)
   nf.t.stats.tx_pkts <- Int32.succ nf.t.stats.tx_pkts;

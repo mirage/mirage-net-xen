@@ -12,4 +12,4 @@ Library "mirage-net-xen"
   Path:               lib
   Findlibname:        mirage-net-xen
   Modules:            Netif
-  BuildDepends:       cstruct, cstruct.syntax, ipaddr, mirage-xen, io-page
+  BuildDepends:       cstruct, cstruct.syntax, ipaddr, mirage-xen, xen-grant, xen-event
