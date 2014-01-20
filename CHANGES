@@ -1,5 +1,6 @@
 1.0.0 (trunk):
 * Depend on the unified io-page library instead of io-page-xen.
+* Depend on new `xen-event` and `xen-grant` packages.
 
 0.9.0 (2013-12-10):
 * Add Travis CI scripts.
