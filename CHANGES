@@ -1,4 +1,4 @@
-1.0.0 (trunk):
+1.1.0 (2013-02-01):
 * Depend on the unified io-page library instead of io-page-xen.
 * Depend on new `xen-event` and `xen-grant` packages.
 
