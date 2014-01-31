@@ -167,6 +167,7 @@ type transport = {
 type t = {
   mutable t: transport;
   mutable resume_fns: (t -> unit Lwt.t) list;
+  mutable receive_callback: Cstruct.t -> unit Lwt.t;
   l : Lwt_mutex.t;
   c : unit Lwt_condition.t;
 }
@@ -303,6 +304,16 @@ let rx_poll nf (fn: Cstruct.t -> unit Lwt.t) =
 let tx_poll nf =
   Lwt_ring.Front.poll nf.tx_client TX.Proto_64.read
 
+let poll_thread (nf: t) : unit Lwt.t =
+  let rec loop from =
+    lwt () = refill_requests nf.t in
+    rx_poll nf.t nf.receive_callback;
+    tx_poll nf.t;
+
+    lwt from = Activations.after nf.t.evtchn from in
+    loop from in
+  loop Activations.program_start
+
 let connect id =
   (* If [id] is an integer, use it. Otherwise default to the first
      available disk. *)
@@ -327,7 +338,10 @@ let connect id =
           lwt t = plug_inner id' in
           let l = Lwt_mutex.create () in
           let c = Lwt_condition.create () in
-          let dev = { t; resume_fns=[]; l; c } in
+          (* packets are dropped until listen is called *)
+          let receive_callback = fun _ -> return () in
+          let dev = { t; resume_fns=[]; receive_callback; l; c } in
+          let (_: unit Lwt.t) = poll_thread dev in
           Hashtbl.add devices id' dev;
           return (`Ok dev)
         with exn ->
@@ -442,18 +456,11 @@ let wait_for_plug nf =
       done)
 
 let listen nf fn =
-  (* Listen for the activation to poll the interface *)
-  let rec poll_t event t =
-    lwt () = refill_requests t in
-    rx_poll t fn;
-    tx_poll t;
-    (* Evtchn.notify nf.t.evtchn; *)
-    lwt (event, new_t) =
-      lwt event = Activations.after t.evtchn event in
-      return (event, t)
-    in poll_t event new_t
-  in
-  poll_t Activations.program_start nf.t
+  (* packets received from this point on will go to [fn]. Historical
+     packets have not been stored: we don't want to buffer the network *)
+  nf.receive_callback <- fn;
+  let t, _ = Lwt.task () in
+  t (* never return *)
 
 (** Return a list of valid VIFs *)
 let enumerate () =
