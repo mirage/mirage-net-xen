@@ -167,6 +167,7 @@ type transport = {
 type t = {
   mutable t: transport;
   mutable resume_fns: (t -> unit Lwt.t) list;
+  mutable receive_callback: Cstruct.t -> unit Lwt.t;
   l : Lwt_mutex.t;
   c : unit Lwt_condition.t;
 }
@@ -260,6 +261,59 @@ let enumerate () =
     printf "Netif.enumerate caught exception: %s\n" (Printexc.to_string e);
     return []
 
+let notify nf () =
+  Eventchn.notify h nf.evtchn
+
+let refill_requests nf =
+  let num = Ring.Rpc.Front.get_free_requests nf.rx_fring in
+  if num > 0 then
+    lwt grefs = Gnt.Gntshr.get_n num in
+    let pages = Io_page.pages num in
+    List.iter
+      (fun (gref, page) ->
+         let id = gref mod (1 lsl 16) in
+         Gnt.Gntshr.grant_access ~domid:nf.backend_id ~writable:true gref page;
+         Hashtbl.add nf.rx_map id (gref, page);
+         let slot_id = Ring.Rpc.Front.next_req_id nf.rx_fring in
+         let slot = Ring.Rpc.Front.slot nf.rx_fring slot_id in
+         ignore(RX.Proto_64.write ~id ~gref:(Int32.of_int gref) slot)
+      ) (List.combine grefs pages);
+    if Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring
+    then notify nf ();
+    return ()
+  else return ()
+
+let rx_poll nf (fn: Cstruct.t -> unit Lwt.t) =
+  Ring.Rpc.Front.ack_responses nf.rx_fring (fun slot ->
+      let id,(offset,flags,status) = RX.Proto_64.read slot in
+      let gref, page = Hashtbl.find nf.rx_map id in
+      Hashtbl.remove nf.rx_map id;
+      Gnt.Gntshr.end_access gref;
+      Gnt.Gntshr.put gref;
+      match status with
+      |sz when status > 0 ->
+        let packet = Cstruct.sub (Io_page.to_cstruct page) 0 sz in
+        nf.stats.rx_pkts <- Int32.succ nf.stats.rx_pkts;
+        nf.stats.rx_bytes <- Int64.add nf.stats.rx_bytes (Int64.of_int sz);
+        ignore_result 
+          (try_lwt fn packet
+           with exn -> return (printf "RX exn %s\n%!" (Printexc.to_string exn)))
+      |err -> printf "RX error %d\n%!" err
+    )
+
+let tx_poll nf =
+  Lwt_ring.Front.poll nf.tx_client TX.Proto_64.read
+
+let poll_thread (nf: t) : unit Lwt.t =
+  let rec loop from =
+    lwt () = refill_requests nf.t in
+    rx_poll nf.t nf.receive_callback;
+    tx_poll nf.t;
+
+    lwt from = Activations.after nf.t.evtchn from in
+    loop from in
+  loop Activations.program_start
+
 let connect id =
   (* If [id] is an integer, use it. Otherwise default to the first
      available disk. *)
@@ -284,7 +338,10 @@ let connect id =
           lwt t = plug_inner id' in
           let l = Lwt_mutex.create () in
           let c = Lwt_condition.create () in
-          let dev = { t; resume_fns=[]; l; c } in
+          (* packets are dropped until listen is called *)
+          let receive_callback = fun _ -> return () in
+          let dev = { t; resume_fns=[]; receive_callback; l; c } in
+          let (_: unit Lwt.t) = poll_thread dev in
           Hashtbl.add devices id' dev;
           return (`Ok dev)
         with exn ->
@@ -304,49 +361,6 @@ let disconnect t =
   printf "Netif: disconnect\n%!";
   Hashtbl.remove devices t.t.id;
   return ()
-
-let notify nf () =
-  Eventchn.notify h nf.evtchn
-
-let refill_requests nf =
-  let num = Ring.Rpc.Front.get_free_requests nf.rx_fring in
-  if num > 0 then
-    lwt grefs = Gnt.Gntshr.get_n num in
-    let pages = Io_page.pages num in
-    List.iter
-      (fun (gref, page) ->
-         let id = gref mod (1 lsl 16) in
-         Gnt.Gntshr.grant_access ~domid:nf.backend_id ~writable:true gref page;
-         Hashtbl.add nf.rx_map id (gref, page);
-         let slot_id = Ring.Rpc.Front.next_req_id nf.rx_fring in
-         let slot = Ring.Rpc.Front.slot nf.rx_fring slot_id in
-         ignore(RX.Proto_64.write ~id ~gref:(Int32.of_int gref) slot)
-      ) (List.combine grefs pages);
-    if Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring
-    then notify nf ();
-    return ()
-  else return ()
-
-let rx_poll nf fn =
-  Ring.Rpc.Front.ack_responses nf.rx_fring (fun slot ->
-      let id,(offset,flags,status) = RX.Proto_64.read slot in
-      let gref, page = Hashtbl.find nf.rx_map id in
-      Hashtbl.remove nf.rx_map id;
-      Gnt.Gntshr.end_access gref;
-      Gnt.Gntshr.put gref;
-      match status with
-      |sz when status > 0 ->
-        let packet = Cstruct.sub (Io_page.to_cstruct page) 0 sz in
-        nf.stats.rx_pkts <- Int32.succ nf.stats.rx_pkts;
-        nf.stats.rx_bytes <- Int64.add nf.stats.rx_bytes (Int64.of_int sz);
-        ignore_result 
-          (try_lwt fn packet
-           with exn -> return (printf "RX exn %s\n%!" (Printexc.to_string exn)))
-      |err -> printf "RX error %d\n%!" err
-    )
-
-let tx_poll nf =
-  Lwt_ring.Front.poll nf.tx_client TX.Proto_64.read
 
 (* Push a single page to the ring, but no event notification *)
 let write_request ?size ~flags nf page =
@@ -442,18 +456,11 @@ let wait_for_plug nf =
       done)
 
 let listen nf fn =
-  (* Listen for the activation to poll the interface *)
-  let rec poll_t event t =
-    lwt () = refill_requests t in
-    rx_poll t fn;
-    tx_poll t;
-    (* Evtchn.notify nf.t.evtchn; *)
-    lwt (event, new_t) =
-      lwt event = Activations.after t.evtchn event in
-      return (event, t)
-    in poll_t event new_t
-  in
-  poll_t Activations.program_start nf.t
+  (* packets received from this point on will go to [fn]. Historical
+     packets have not been stored: we don't want to buffer the network *)
+  nf.receive_callback <- fn;
+  let t, _ = Lwt.task () in
+  t (* never return *)
 
 (** Return a list of valid VIFs *)
 let enumerate () =
