@@ -260,6 +260,49 @@ let enumerate () =
     printf "Netif.enumerate caught exception: %s\n" (Printexc.to_string e);
     return []
 
+let notify nf () =
+  Eventchn.notify h nf.evtchn
+
+let refill_requests nf =
+  let num = Ring.Rpc.Front.get_free_requests nf.rx_fring in
+  if num > 0 then
+    lwt grefs = Gnt.Gntshr.get_n num in
+    let pages = Io_page.pages num in
+    List.iter
+      (fun (gref, page) ->
+         let id = gref mod (1 lsl 16) in
+         Gnt.Gntshr.grant_access ~domid:nf.backend_id ~writable:true gref page;
+         Hashtbl.add nf.rx_map id (gref, page);
+         let slot_id = Ring.Rpc.Front.next_req_id nf.rx_fring in
+         let slot = Ring.Rpc.Front.slot nf.rx_fring slot_id in
+         ignore(RX.Proto_64.write ~id ~gref:(Int32.of_int gref) slot)
+      ) (List.combine grefs pages);
+    if Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring
+    then notify nf ();
+    return ()
+  else return ()
+
+let rx_poll nf (fn: Cstruct.t -> unit Lwt.t) =
+  Ring.Rpc.Front.ack_responses nf.rx_fring (fun slot ->
+      let id,(offset,flags,status) = RX.Proto_64.read slot in
+      let gref, page = Hashtbl.find nf.rx_map id in
+      Hashtbl.remove nf.rx_map id;
+      Gnt.Gntshr.end_access gref;
+      Gnt.Gntshr.put gref;
+      match status with
+      |sz when status > 0 ->
+        let packet = Cstruct.sub (Io_page.to_cstruct page) 0 sz in
+        nf.stats.rx_pkts <- Int32.succ nf.stats.rx_pkts;
+        nf.stats.rx_bytes <- Int64.add nf.stats.rx_bytes (Int64.of_int sz);
+        ignore_result 
+          (try_lwt fn packet
+           with exn -> return (printf "RX exn %s\n%!" (Printexc.to_string exn)))
+      |err -> printf "RX error %d\n%!" err
+    )
+
+let tx_poll nf =
+  Lwt_ring.Front.poll nf.tx_client TX.Proto_64.read
+
 let connect id =
   (* If [id] is an integer, use it. Otherwise default to the first
      available disk. *)
@@ -304,49 +347,6 @@ let disconnect t =
   printf "Netif: disconnect\n%!";
   Hashtbl.remove devices t.t.id;
   return ()
-
-let notify nf () =
-  Eventchn.notify h nf.evtchn
-
-let refill_requests nf =
-  let num = Ring.Rpc.Front.get_free_requests nf.rx_fring in
-  if num > 0 then
-    lwt grefs = Gnt.Gntshr.get_n num in
-    let pages = Io_page.pages num in
-    List.iter
-      (fun (gref, page) ->
-         let id = gref mod (1 lsl 16) in
-         Gnt.Gntshr.grant_access ~domid:nf.backend_id ~writable:true gref page;
-         Hashtbl.add nf.rx_map id (gref, page);
-         let slot_id = Ring.Rpc.Front.next_req_id nf.rx_fring in
-         let slot = Ring.Rpc.Front.slot nf.rx_fring slot_id in
-         ignore(RX.Proto_64.write ~id ~gref:(Int32.of_int gref) slot)
-      ) (List.combine grefs pages);
-    if Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring
-    then notify nf ();
-    return ()
-  else return ()
-
-let rx_poll nf fn =
-  Ring.Rpc.Front.ack_responses nf.rx_fring (fun slot ->
-      let id,(offset,flags,status) = RX.Proto_64.read slot in
-      let gref, page = Hashtbl.find nf.rx_map id in
-      Hashtbl.remove nf.rx_map id;
-      Gnt.Gntshr.end_access gref;
-      Gnt.Gntshr.put gref;
-      match status with
-      |sz when status > 0 ->
-        let packet = Cstruct.sub (Io_page.to_cstruct page) 0 sz in
-        nf.stats.rx_pkts <- Int32.succ nf.stats.rx_pkts;
-        nf.stats.rx_bytes <- Int64.add nf.stats.rx_bytes (Int64.of_int sz);
-        ignore_result 
-          (try_lwt fn packet
-           with exn -> return (printf "RX exn %s\n%!" (Printexc.to_string exn)))
-      |err -> printf "RX error %d\n%!" err
-    )
-
-let tx_poll nf =
-  Lwt_ring.Front.poll nf.tx_client TX.Proto_64.read
 
 (* Push a single page to the ring, but no event notification *)
 let write_request ?size ~flags nf page =
