@@ -362,13 +362,23 @@ let disconnect t =
   Hashtbl.remove devices t.t.id;
   return ()
 
+let page_size = Io_page.round_to_page_size 1
+
 (* Push a single page to the ring, but no event notification *)
 let write_request ?size ~flags nf page =
+  let len = Cstruct.len page in
+  if page.Cstruct.off + len > page_size then begin
+    (* netback rejects packets that cross page boundaries *)
+    let msg =
+      Printf.sprintf "Invalid page: offset=%d, length=%d" page.Cstruct.off len in
+    print_endline msg;
+    Lwt.fail (Failure msg)
+  end else
   lwt gref = Gnt.Gntshr.get () in
   (* This grants access to the *base* data pointer of the page *)
   (* XXX: another place where we peek inside the cstruct *)
   Gnt.Gntshr.grant_access ~domid:nf.t.backend_id ~writable:false gref page.Cstruct.buffer;
-  let size = match size with |None -> Cstruct.len page |Some s -> s in
+  let size = match size with |None -> len |Some s -> s in
   (* XXX: another place where we peek inside the cstruct *)
   nf.t.stats.tx_pkts <- Int32.succ nf.t.stats.tx_pkts;
   nf.t.stats.tx_bytes <- Int64.add nf.t.stats.tx_bytes (Int64.of_int size);
