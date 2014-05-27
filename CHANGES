@@ -1,4 +1,7 @@
-1.1.0 (2013-02-01):
+1.1.1 (2014-05-27):
+* Do not send oversized frames to the backend Netfront (#9 from Edwin Torok).
+
+1.1.0 (2014-02-01):
 * Depend on the unified io-page library instead of io-page-xen.
 * Depend on new `xen-event` and `xen-grant` packages.
 
