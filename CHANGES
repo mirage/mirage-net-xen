@@ -1,3 +1,8 @@
+1.1.2 (2014-07-23):
+* Wait for packets to be processed by the backend before returning from
+  a `writev` call. Without this, the caller has no way to know when
+  it's safe to reuse the buffer (#11).
+
 1.1.1 (2014-05-27):
 * Do not send oversized frames to the backend Netfront (#9 from Edwin Torok).
 
