@@ -455,7 +455,7 @@ let writev nf pages =
          lwt rest_th = xmit other_pages in
          (* All fragments are now written, we can now notify the backend *)
          Lwt_ring.Front.push nf.t.tx_client (notify nf.t);
-         join rest_th
+         return ()
     )
 
 let wait_for_plug nf =
