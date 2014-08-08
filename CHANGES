@@ -1,3 +1,8 @@
+1.1.3 (2014-08-08):
+* Revert the serialization in 1.1.2 as Xen/ARM (4.5 and backport to 4.4)
+  has been fixed to support granting the same page multiple times.
+  Backport is in https://github.com/mirage/xen-arm-builder.
+
 1.1.2 (2014-07-23):
 * Wait for packets to be processed by the backend before returning from
   a `writev` call. Without this, the caller has no way to know when

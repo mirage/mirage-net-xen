@@ -1,6 +1,6 @@
 # OASIS_START
-# DO NOT EDIT (digest: 782951cf4cbcbb39b579491fd67004cc)
-version = "1.1.2"
+# DO NOT EDIT (digest: b5945f62a6e830f7ab05a28f8689770e)
+version = "1.1.3"
 description = "Xen network frontend driver implementation"
 requires =
 "lwt.syntax cstruct cstruct.syntax ipaddr mirage-xen xen-evtchn xen-gnt"
