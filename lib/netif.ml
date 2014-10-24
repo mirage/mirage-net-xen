@@ -284,6 +284,7 @@ let refill_requests nf =
   else return ()
 
 let rx_poll nf (fn: Cstruct.t -> unit Lwt.t) =
+  MProf.Trace.label "Netif.rx_poll";
   Ring.Rpc.Front.ack_responses nf.rx_fring (fun slot ->
       let id,(offset,flags,status) = RX.Proto_64.read slot in
       let gref, page = Hashtbl.find nf.rx_map id in
@@ -302,6 +303,7 @@ let rx_poll nf (fn: Cstruct.t -> unit Lwt.t) =
     )
 
 let tx_poll nf =
+  MProf.Trace.label "Netif.tx_poll";
   Lwt_ring.Front.poll nf.tx_client TX.Proto_64.read
 
 let poll_thread (nf: t) : unit Lwt.t =
@@ -462,6 +464,7 @@ let wait_for_plug nf =
   Printf.printf "Wait for plug...\n";
   Lwt_mutex.with_lock nf.l (fun () ->
       while_lwt not (Eventchn.is_valid nf.t.evtchn) do
+        MProf.Trace.label "Netif.wait_for_plug";
         Lwt_condition.wait ~mutex:nf.l nf.c
       done)
 
@@ -469,7 +472,7 @@ let listen nf fn =
   (* packets received from this point on will go to [fn]. Historical
      packets have not been stored: we don't want to buffer the network *)
   nf.receive_callback <- fn;
-  let t, _ = Lwt.task () in
+  let t, _ = MProf.Trace.named_task "Netif.listen" in
   t (* never return *)
 
 (** Return a list of valid VIFs *)

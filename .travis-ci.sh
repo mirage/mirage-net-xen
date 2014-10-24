@@ -1,4 +1,4 @@
-OPAM_DEPENDS="mirage mirage-clock-xen mirage-xen"
+OPAM_DEPENDS="mirage mirage-clock-xen mirage-xen mirage-profile"
 
 case "$OCAML_VERSION,$OPAM_VERSION" in
 3.12.1,1.0.0) ppa=avsm/ocaml312+opam10 ;;
