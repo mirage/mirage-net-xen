@@ -23,6 +23,7 @@ opam --version
 opam --git-version
 
 opam init
+opam update
 depext=`opam install -e ubuntu $OPAM_DEPENDS`
 sudo apt-get install -qq $depext
 opam install ${OPAM_DEPENDS}
