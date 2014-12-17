@@ -1,3 +1,6 @@
+1.2.0 (2014-12-17):
+* Add profiling tracepoints and labels (#13).  Introduces a dependency on `mirage-profile`.
+
 1.1.3 (2014-08-08):
 * Revert the serialization in 1.1.2 as Xen/ARM (4.5 and backport to 4.4)
   has been fixed to support granting the same page multiple times.
