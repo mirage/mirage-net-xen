@@ -151,7 +151,6 @@ type transport = {
   backend_id: int;
   backend: string;
   mac: Macaddr.t;
-  tx_fring: (TX.response,int) Ring.Rpc.Front.t;
   tx_client: (TX.response,int) Lwt_ring.Front.t;
   tx_gnt: Gnt.gntref;
   tx_mutex: Lwt_mutex.t; (* Held to avoid signalling between fragments *)
@@ -239,7 +238,7 @@ let plug_inner id =
   Eventchn.unmask h evtchn;
   let stats = { rx_pkts=0l;rx_bytes=0L;tx_pkts=0l;tx_bytes=0L } in
   (* Register callback activation *)
-  return { id; backend_id; tx_fring; tx_client; tx_gnt; tx_mutex; 
+  return { id; backend_id; tx_client; tx_gnt; tx_mutex; 
            rx_gnt; rx_fring; rx_client; rx_map; stats;
            evtchn; mac; backend; features; 
          }
@@ -423,16 +422,8 @@ let write nf page =
 let writev nf pages =
   Lwt_mutex.with_lock nf.t.tx_mutex
     (fun () ->
-       let rec wait_for_free_tx event n =
-         let numfree = Ring.Rpc.Front.get_free_requests nf.t.tx_fring in 
-         if n >= numfree then 
-           lwt event = Activations.after nf.t.evtchn event in
-           wait_for_free_tx event n
-         else
-           return ()
-       in
        let numneeded = List.length pages in
-       wait_for_free_tx Activations.program_start numneeded >>
+       lwt () = Lwt_ring.Front.wait_for_free nf.t.tx_client numneeded in
        match pages with
        |[] -> return ()
        |[page] ->
