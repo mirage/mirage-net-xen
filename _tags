@@ -26,3 +26,4 @@ true: annot, bin_annot
 <lib/*.ml{,i,y}>: pkg_xen-gnt
 # OASIS_STOP
 true: annot, bin_annot, debug, principal
+true: warn(A-27-32-34-37), strict_sequence

@@ -1,3 +1,7 @@
+* When waiting for space in the transmit queue, we would sometimes fail to notice when
+  space became available.
+* Copy out-bound data into pre-shared pages for performance, security and simplicity.
+
 1.2.0 (2014-12-17):
 * Add profiling tracepoints and labels (#13).  Introduces a dependency on `mirage-profile`.
 * New `opam` file present in source repository for OPAM 1.2 workflow.
