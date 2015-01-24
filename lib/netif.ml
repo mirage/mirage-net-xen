@@ -391,12 +391,12 @@ let tx_poll nf =
 
 let poll_thread (nf: t) : unit Lwt.t =
   let rec loop from =
-    lwt () = refill_requests nf.t in
     rx_poll nf.t nf.receive_callback;
+    refill_requests nf.t >>= fun () ->
     tx_poll nf.t;
-
-    lwt from = Activations.after nf.t.evtchn from in
-    loop from in
+    Activations.after nf.t.evtchn from >>= fun from ->
+    loop from
+  in
   loop Activations.program_start
 
 let connect id =
