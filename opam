@@ -3,10 +3,8 @@ maintainer:    "anil@recoil.org"
 homepage:      "https://github.com/mirage/mirage-net-xen"
 bug-reports:   "https://github.com/mirage/mirage-net-xen/issues"
 dev-repo:      "https://github.com/mirage/mirage-net-xen.git"
-build: [
-  [make]
-  [make "install"]
-]
+build: [ [make] ]
+install: [ [make "install"] ]
 remove: ["ocamlfind" "remove" "mirage-net-xen"]
 depends: [
   "ocamlfind"

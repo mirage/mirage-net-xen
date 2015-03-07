@@ -1,6 +1,6 @@
 # OASIS_START
-# DO NOT EDIT (digest: 359ed9b327bc26524f3cee5aaa540534)
-version = "1.3.0"
+# DO NOT EDIT (digest: 4c360801c572c2f68b4407ec8558acd5)
+version = "1.4.0"
 description = "Xen network frontend driver implementation"
 requires = "lwt cstruct ipaddr mirage-xen xen-evtchn xen-gnt mirage-profile"
 archive(byte) = "mirage-net-xen.cma"
