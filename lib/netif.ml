@@ -317,6 +317,14 @@ let plug_inner id =
   let rx_map = Hashtbl.create 1 in
   Printf.printf " sg:%b gso_tcpv4:%b rx_copy:%b rx_flip:%b smart_poll:%b\n"
     features.sg features.gso_tcpv4 features.rx_copy features.rx_flip features.smart_poll;
+  lwt () = Xs.(wait xsc (fun h ->
+    try_lwt
+      lwt state = read h (backend ^ "/state") in
+      if state = Device_state.(to_string Connected)
+      then return ()
+      else raise Xs_protocol.Eagain
+    with Xs_protocol.Enoent _ -> raise Xs_protocol.Eagain
+  )) in
   Eventchn.unmask h evtchn;
   let stats = { rx_pkts=0l;rx_bytes=0L;tx_pkts=0l;tx_bytes=0L } in
   let grant_tx_page = Gnt.Gntshr.grant_access ~domid:backend_id ~writable:false in
