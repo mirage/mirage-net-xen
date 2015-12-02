@@ -456,32 +456,13 @@ let disconnect t =
   Hashtbl.remove devices t.t.id;
   return ()
 
-(** Copy from src to dst until src is exhausted or dst is full.
- * Returns the number of bytes copied and the remaining data from src, if any. *)
-(* TODO: replace this with Cstruct.buffer once that's released. *)
-let blitv src dst =
-  let rec aux dst n = function
-    | [] -> n, []
-    | hd::tl ->
-        let avail = Cstruct.len dst in
-        let first = Cstruct.len hd in
-        if first <= avail then (
-          Cstruct.blit hd 0 dst 0 first;
-          aux (Cstruct.shift dst first) (n + first) tl
-        ) else (
-          Cstruct.blit hd 0 dst 0 avail;
-          let rest_hd = Cstruct.shift hd first in
-          (n + avail, rest_hd :: tl)
-        ) in
-  aux dst 0 src
-
 (* Push up to one page's worth of data to the ring, but without sending an
  * event notification. Once the data has been added to the ring, returns the
  * remaining (unsent) data and a thread which will return when the data has
  * been ack'd by netback. *)
 let write_request ?size ~flags nf datav =
   Shared_page_pool.use nf.t.tx_pool (fun gref shared_block ->
-    let len, datav = blitv datav shared_block in
+    let len, datav = Cstruct.fillv ~src:datav ~dst:shared_block in
     (* [size] includes extra pages to follow later *)
     let size = match size with |None -> len |Some s -> s in
     nf.t.stats.tx_pkts <- Int32.succ nf.t.stats.tx_pkts;

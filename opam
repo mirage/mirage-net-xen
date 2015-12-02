@@ -8,7 +8,7 @@ install: [ [make "install"] ]
 remove: ["ocamlfind" "remove" "mirage-net-xen"]
 depends: [
   "ocamlfind"
-  "cstruct" {>= "1.0.1"}
+  "cstruct" {>= "1.7.1"}
   "lwt" {>= "2.4.3"}
   "mirage-types" {>= "1.1.0"}
   "io-page" {>= "1.0.0"}
