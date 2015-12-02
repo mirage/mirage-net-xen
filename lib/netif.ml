@@ -14,7 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-open Lwt
+open Lwt.Infix
 open Printf
 open OS
 
@@ -29,6 +29,8 @@ type error = [
   | `Unimplemented     (** operation not yet implemented in the code *)
   | `Disconnected      (** the device has been previously disconnected *)
 ]
+
+let return = Lwt.return
 
 let allocate_ring ~domid =
   let page = Io_page.get 1 in
@@ -387,7 +389,7 @@ let rx_poll nf (fn: Cstruct.t -> unit Lwt.t) =
         let packet = Cstruct.sub (Io_page.to_cstruct page) 0 sz in
         nf.stats.rx_pkts <- Int32.succ nf.stats.rx_pkts;
         nf.stats.rx_bytes <- Int64.add nf.stats.rx_bytes (Int64.of_int sz);
-        ignore_result 
+        Lwt.ignore_result 
           (try_lwt fn packet
            with exn -> return (printf "RX exn %s\n%!" (Printexc.to_string exn)))
       |err -> printf "RX error %d\n%!" err
@@ -519,7 +521,7 @@ let writev_no_retry nf datav =
 let rec writev nf datav =
   lwt released =
     try_lwt writev_no_retry nf datav
-    with Lwt_ring.Shutdown -> return (fail Lwt_ring.Shutdown) in
+    with Lwt_ring.Shutdown -> return (Lwt.fail Lwt_ring.Shutdown) in
   Lwt.on_failure released (function
     | Lwt_ring.Shutdown -> ignore (writev nf datav)
     | ex -> raise ex
@@ -547,7 +549,7 @@ let listen nf fn =
 let enumerate () =
   Xs.make ()
   >>= fun xsc ->
-  catch
+  Lwt.catch
     (fun () -> 
        Xs.(immediate xsc 
              (fun h -> directory h "device/vif")) 
@@ -586,6 +588,6 @@ let reset_stats_counters t =
   t.t.stats.tx_bytes <- 0L;
   t.t.stats.tx_pkts  <- 0l
 
-let _ =
+let () =
   printf "Netif: add resume hook\n%!";
   Sched.add_resume_hook resume
