@@ -17,6 +17,7 @@
 open Lwt.Infix
 open Printf
 open OS
+open Result
 
 type 'a io = 'a Lwt.t
 type page_aligned_buffer = Io_page.t
@@ -42,101 +43,25 @@ let allocate_ring ~domid =
   Gnt.Gntshr.grant_access ~domid ~writable:true gnt page;
   return (gnt, x)
 
-module RX = struct
+let create_rx (id, domid) =
+  let name = sprintf "Netif.RX.%d" id in
+  lwt rx_gnt, buf = allocate_ring ~domid in
+  let sring = Ring.Rpc.of_buf ~buf ~idx_size:RX.total_size ~name in
+  let fring = Ring.Rpc.Front.init ~sring in
+  let client = Lwt_ring.Front.init string_of_int fring in
+  return (rx_gnt, fring, client)
 
-  module Proto_64 = struct
-    cstruct req {
-      uint16_t       id;
-      uint16_t       _padding;
-      uint32_t       gref
-    } as little_endian
-
-    let write ~id ~gref slot =
-      set_req_id slot id;
-      set_req_gref slot gref;
-      id
-
-        cstruct resp {
-        uint16_t       id;
-        uint16_t       offset;
-        uint16_t       flags;
-        uint16_t       status
-      } as little_endian
-
-    let read slot =
-      get_resp_id slot,
-      (get_resp_offset slot, get_resp_flags slot, get_resp_status slot)
-
-    let total_size = max sizeof_req sizeof_resp
-    let _ = assert(total_size = 8)
-  end
-
-  type response = int * int * int
-
-  let create (id, domid) =
-    let name = sprintf "Netif.RX.%d" id in
-    lwt rx_gnt, buf = allocate_ring ~domid in
-    let sring = Ring.Rpc.of_buf ~buf ~idx_size:Proto_64.total_size ~name in
-    let fring = Ring.Rpc.Front.init ~sring in
-    let client = Lwt_ring.Front.init string_of_int fring in
-    return (rx_gnt, fring, client)
-
-end
-
-module TX = struct
-
-  type response = int
-
-  module Proto_64 = struct
-    cstruct req {
-      uint32_t       gref;
-      uint16_t       offset;
-      uint16_t       flags;
-      uint16_t       id;
-      uint16_t       size
-    } as little_endian
-
-    type flags =
-      |Checksum_blank (* 1 *)
-      |Data_validated (* 2 *)
-      |More_data      (* 4 *)
-      |Extra_info     (* 8 *)
-
-    let flag_more_data = 4
-
-    let write ~gref ~offset ~flags ~id ~size slot =
-      set_req_gref slot gref;
-      set_req_offset slot offset;
-      set_req_flags slot flags;
-      set_req_id slot id;
-      set_req_size slot size;
-      id
-
-        cstruct resp {
-        uint16_t       id;
-        uint16_t       status
-      } as little_endian
-
-    let read slot =
-      get_resp_id slot, get_resp_status slot
-
-    let total_size = max sizeof_req sizeof_resp
-    let _ = assert(total_size = 12)
-  end
-
-  let create (id, domid) =
-    let name = sprintf "Netif.TX.%d" id in
-    lwt rx_gnt, buf = allocate_ring ~domid in
-    let sring = Ring.Rpc.of_buf ~buf ~idx_size:Proto_64.total_size ~name in
-    let fring = Ring.Rpc.Front.init ~sring in
-    let client = Lwt_ring.Front.init string_of_int fring in
-    return (rx_gnt, fring, client)
-end
+let create_tx (id, domid) =
+  let name = sprintf "Netif.TX.%d" id in
+  lwt rx_gnt, buf = allocate_ring ~domid in
+  let sring = Ring.Rpc.of_buf ~buf ~idx_size:TX.total_size ~name in
+  let fring = Ring.Rpc.Front.init ~sring in
+  let client = Lwt_ring.Front.init string_of_int fring in
+  return (rx_gnt, fring, client)
 
 module Shared_page_pool : sig
   type t
   val make : (Gnt.gntref -> Io_page.t -> unit) -> t
-  val block_size : int
 
   val use : t -> (Gnt.gntref -> Cstruct.t -> ('a * unit Lwt.t) Lwt.t) -> ('a * unit Lwt.t) Lwt.t
   (** [use t fn] calls [fn gref block] with a free shared block of memory.
@@ -230,16 +155,16 @@ type stats = {
 }
 
 type transport = {
-  id: int;
+  vif_id: int;
   backend_id: int;
   backend: string;
   mac: Macaddr.t;
-  tx_client: (TX.response,int) Lwt_ring.Front.t;
+  tx_client: (TX.Response.t,int) Lwt_ring.Front.t;
   tx_gnt: Gnt.gntref;
   tx_mutex: Lwt_mutex.t; (* Held to avoid signalling between fragments *)
   tx_pool: Shared_page_pool.t;
-  rx_fring: (RX.response,int) Ring.Rpc.Front.t;
-  rx_client: (RX.response,int) Lwt_ring.Front.t;
+  rx_fring: (RX.Response.t,int) Ring.Rpc.Front.t;
+  rx_client: (RX.Response.t,int) Lwt_ring.Front.t;
   rx_map: (int, Gnt.gntref * Io_page.t) Hashtbl.t;
   rx_gnt: Gnt.gntref;
   evtchn: Eventchn.t;
@@ -257,30 +182,25 @@ type t = {
 
 type id = string
 
-let id t = string_of_int t.t.id
-let backend_id t = t.t.backend_id
-
-let devices : (id, t) Hashtbl.t = Hashtbl.create 1
-
 let h = Eventchn.init ()
 
 (* Given a VIF ID and backend domid, construct a netfront record for it *)
-let plug_inner id =
+let plug_inner vif_id =
   lwt xsc = Xs.make () in
   lwt backend_id =
     Xs.(immediate xsc 
           (fun h -> 
-             read h (sprintf "device/vif/%d/backend-id" id)))
+             read h (sprintf "device/vif/%d/backend-id" vif_id)))
     >|= int_of_string in
-  Printf.printf "Netfront.create: id=%d domid=%d\n%!" id backend_id;
+  Printf.printf "Netfront.create: id=%d domid=%d\n%!" vif_id backend_id;
   (* Allocate a transmit and receive ring, and event channel for them *)
-  lwt (rx_gnt, rx_fring, rx_client) = RX.create (id, backend_id) in
-  lwt (tx_gnt, _tx_fring, tx_client) = TX.create (id, backend_id) in
+  lwt (rx_gnt, rx_fring, rx_client) = create_rx (vif_id, backend_id) in
+  lwt (tx_gnt, _tx_fring, tx_client) = create_tx (vif_id, backend_id) in
   let tx_mutex = Lwt_mutex.create () in
   let evtchn = Eventchn.bind_unbound_port h backend_id in
   let evtchn_port = Eventchn.to_int evtchn in
   (* Read Xenstore info and set state to Connected *)
-  let node = sprintf "device/vif/%d/" id in
+  let node = sprintf "device/vif/%d/" vif_id in
   lwt backend = Xs.(immediate xsc (fun h -> read h (node ^ "backend"))) in
   lwt mac =
     Xs.(immediate xsc (fun h -> read h (node ^ "mac"))) 
@@ -308,7 +228,7 @@ let plug_inner id =
           function
           |"1" -> return true
           |_ -> return false
-        with exn -> return false in
+        with _exn -> return false in
       lwt sg = rdfn "sg" in
       lwt gso_tcpv4 = rdfn "gso-tcpv4" in
       lwt rx_copy = rdfn "rx-copy" in
@@ -332,15 +252,13 @@ let plug_inner id =
   let grant_tx_page = Gnt.Gntshr.grant_access ~domid:backend_id ~writable:false in
   let tx_pool = Shared_page_pool.make grant_tx_page in
   (* Register callback activation *)
-  return { id; backend_id; tx_client; tx_gnt; tx_mutex; tx_pool;
+  return { vif_id; backend_id; tx_client; tx_gnt; tx_mutex; tx_pool;
            rx_gnt; rx_fring; rx_client; rx_map; stats;
            evtchn; mac; backend; features; 
          }
 
 (** Set of active block devices *)
 let devices : (int, t) Hashtbl.t = Hashtbl.create 1
-
-let devices_waiters : (int, t Lwt.u Lwt_sequence.t) Hashtbl.t = Hashtbl.create 1
 
 (** Return a list of valid VIFs *)
 let enumerate () =
@@ -369,7 +287,7 @@ let refill_requests nf =
          Hashtbl.add nf.rx_map id (gref, page);
          let slot_id = Ring.Rpc.Front.next_req_id nf.rx_fring in
          let slot = Ring.Rpc.Front.slot nf.rx_fring slot_id in
-         ignore(RX.Proto_64.write ~id ~gref:(Int32.of_int gref) slot)
+         ignore(RX.Request.(write {id; gref = Int32.of_int gref}) slot)
       ) (List.combine grefs pages);
     if Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring
     then notify nf ();
@@ -379,7 +297,9 @@ let refill_requests nf =
 let rx_poll nf (fn: Cstruct.t -> unit Lwt.t) =
   MProf.Trace.label "Netif.rx_poll";
   Ring.Rpc.Front.ack_responses nf.rx_fring (fun slot ->
-      let id,(offset,flags,status) = RX.Proto_64.read slot in
+      match RX.Response.read slot with
+      | Error msg -> failwith msg
+      | Ok {RX.Response.id; status; _} ->
       let gref, page = Hashtbl.find nf.rx_map id in
       Hashtbl.remove nf.rx_map id;
       Gnt.Gntshr.end_access gref;
@@ -397,7 +317,10 @@ let rx_poll nf (fn: Cstruct.t -> unit Lwt.t) =
 
 let tx_poll nf =
   MProf.Trace.label "Netif.tx_poll";
-  Lwt_ring.Front.poll nf.tx_client TX.Proto_64.read
+  Lwt_ring.Front.poll nf.tx_client (fun slot ->
+    let resp = TX.Response.read slot in
+    (resp.TX.Response.id, resp)
+  )
 
 let poll_thread (nf: t) : unit Lwt.t =
   let rec loop from =
@@ -455,7 +378,7 @@ let connect id =
 let disconnect t =
   printf "Netif: disconnect\n%!";
   Shared_page_pool.shutdown t.t.tx_pool;
-  Hashtbl.remove devices t.t.id;
+  Hashtbl.remove devices t.t.vif_id;
   return ()
 
 (* Push up to one page's worth of data to the ring, but without sending an
@@ -469,8 +392,16 @@ let write_request ?size ~flags nf datav =
     let size = match size with |None -> len |Some s -> s in
     nf.t.stats.tx_pkts <- Int32.succ nf.t.stats.tx_pkts;
     nf.t.stats.tx_bytes <- Int64.add nf.t.stats.tx_bytes (Int64.of_int size);
+    let id = gref in
+    let request = { TX.Request.
+      id;
+      gref = Int32.of_int gref;
+      offset = shared_block.Cstruct.off;
+      flags;
+      size
+    } in
     lwt replied = Lwt_ring.Front.write nf.t.tx_client
-        (TX.Proto_64.write ~id:gref ~gref:(Int32.of_int gref) ~offset:shared_block.Cstruct.off ~flags ~size) in
+        (fun slot -> TX.Request.write request slot; id) in
     (* request has been written; when replied returns we have a reply *)
     let release = replied >>= fun _ -> return () in
     return (datav, release)
@@ -479,7 +410,7 @@ let write_request ?size ~flags nf datav =
 (* Transmit a packet from buffer, with offset and length.
  * The buffer's data must fit in a single block. *)
 let write_already_locked nf datav =
-  lwt remaining, th = write_request ~flags:0 nf datav in
+  lwt remaining, th = write_request ~flags:[] nf datav in
   assert (Cstruct.lenv remaining = 0);
   Lwt_ring.Front.push nf.t.tx_client (notify nf.t);
   return th
@@ -501,15 +432,15 @@ let writev_no_retry nf datav =
           * length, which the backend will use to consume the remaining
           * fragments until the full length is satisfied *)
          lwt datav, first_th =
-           write_request ~flags:TX.Proto_64.flag_more_data ~size nf datav in
+           write_request ~flags:[Flag.More_data] ~size nf datav in
          let rec xmit datav = function
            | 0 -> return []
            | 1 ->
-               lwt datav, th = write_request ~flags:0 nf datav in
+               lwt datav, th = write_request ~flags:[] nf datav in
                assert (Cstruct.lenv datav = 0);
                return [ th ]
            | n ->
-               lwt datav, next_th = write_request ~flags:TX.Proto_64.flag_more_data nf datav in
+               lwt datav, next_th = write_request ~flags:[Flag.More_data] nf datav in
                lwt rest = xmit datav (n - 1) in
                return (next_th :: rest) in
          lwt rest_th = xmit datav (n - 1) in
@@ -530,31 +461,12 @@ let rec writev nf datav =
 
 let write nf data = writev nf [data]
 
-let wait_for_plug nf =
-  Printf.printf "Wait for plug...\n";
-  Lwt_mutex.with_lock nf.l (fun () ->
-      while_lwt not (Eventchn.is_valid nf.t.evtchn) do
-        MProf.Trace.label "Netif.wait_for_plug";
-        Lwt_condition.wait ~mutex:nf.l nf.c
-      done)
-
 let listen nf fn =
   (* packets received from this point on will go to [fn]. Historical
      packets have not been stored: we don't want to buffer the network *)
   nf.receive_callback <- fn;
   let t, _ = MProf.Trace.named_task "Netif.listen" in
   t (* never return *)
-
-(** Return a list of valid VIFs *)
-let enumerate () =
-  Xs.make ()
-  >>= fun xsc ->
-  Lwt.catch
-    (fun () -> 
-       Xs.(immediate xsc 
-             (fun h -> directory h "device/vif")) 
-       >|= (List.map int_of_string) )
-    (fun _ -> return [])
 
 let resume (id,t) =
   lwt transport = plug_inner id in
@@ -570,12 +482,6 @@ let resume (id,t) =
 let resume () =
   let devs = Hashtbl.fold (fun k v acc -> (k,v)::acc) devices [] in
   Lwt_list.iter_p (fun (k,v) -> resume (k,v)) devs
-
-let add_resume_hook t fn =
-  t.resume_fns <- fn::t.resume_fns
-
-(* Type of callback functions for [create]. *)
-type callback = id -> t -> unit Lwt.t
 
 (* The Xenstore MAC address is colon separated, very helpfully *)
 let mac nf = nf.t.mac

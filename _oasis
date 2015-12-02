@@ -9,8 +9,16 @@ BuildTools:  ocamlbuild
 
 Library "mirage-net-xen"
   CompiledObject:     best
-  Path:               lib
+  Path:               compat
   Findlibname:        mirage-net-xen
   Modules:            Netif
-  BuildDepends:       lwt.syntax, cstruct, cstruct.syntax, ipaddr, mirage-xen, xen-evtchn, xen-gnt, mirage-profile
-  XMETARequires:      lwt, cstruct, ipaddr, mirage-xen, xen-evtchn, xen-gnt, mirage-profile
+  BuildDepends:       netchannel
+
+Library "netchannel"
+  Pack:               true
+  CompiledObject:     best
+  Path:               lib
+  Modules:            Frontend
+  InternalModules:    Flag, ResultM, RX, TX
+  BuildDepends:       lwt.syntax, cstruct, cstruct.syntax, ipaddr, mirage-xen, xen-evtchn, xen-gnt, mirage-profile, result
+  XMETARequires:      lwt, cstruct, ipaddr, mirage-xen, xen-evtchn, xen-gnt, mirage-profile, result

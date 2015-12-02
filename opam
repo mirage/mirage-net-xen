@@ -5,7 +5,10 @@ bug-reports:   "https://github.com/mirage/mirage-net-xen/issues"
 dev-repo:      "https://github.com/mirage/mirage-net-xen.git"
 build: [ [make] ]
 install: [ [make "install"] ]
-remove: ["ocamlfind" "remove" "mirage-net-xen"]
+remove: [
+  ["ocamlfind" "remove" "mirage-net-xen"]
+  ["ocamlfind" "remove" "netchannel"]
+]
 depends: [
   "ocamlfind"
   "cstruct" {>= "1.7.1"}
@@ -15,5 +18,6 @@ depends: [
   "mirage-xen" {>= "1.1.0"}
   "ipaddr" {>= "1.0.0"}
   "mirage-profile" {>="0.3"}
+  "result"
 ]
 ocaml-version: [>= "4.01.0"]
