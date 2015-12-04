@@ -1,8 +1,12 @@
 # OASIS_START
-# DO NOT EDIT (digest: 04d88c090d77cf18ac8a4f838066d0df)
+# DO NOT EDIT (digest: 55700599216bbaeb08159b28f79dae0c)
 Frontend
 Flag
 ResultM
 RX
 TX
+Xenstore
+S
+Features
+Shared_page_pool
 # OASIS_STOP

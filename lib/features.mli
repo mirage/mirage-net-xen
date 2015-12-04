@@ -1,5 +1,5 @@
 (*
- * Copyright (c) 2011-2013 Anil Madhavapeddy <anil@recoil.org>
+ * Copyright (c) 2013-2015 Citrix Systems Inc
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,14 +14,16 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-(** Xen Netfront interface for Ethernet I/O. *)
-module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) : sig
-  include V1.NETWORK
-  with type 'a io = 'a Lwt.t
-  and type     page_aligned_buffer = Io_page.t
-  and type     buffer = Cstruct.t
-  and type     id = string
-  and type     macaddr = Macaddr.t
+type t = {
+  rx_copy: bool;
+  rx_flip: bool;
+  rx_notify: bool;
+  sg: bool;
+  gso_tcpv4: bool;
+  smart_poll: bool;
+} with sexp
+(** All the features of which news has reached harvard; there may be others
+    but they haven't been discovered *)
 
-  val connect : string -> [`Ok of t | `Error of error] io
-end
+val supported: t
+(** Set of features supported by this driver version *)

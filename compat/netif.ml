@@ -1,1 +1,1 @@
-include Netchannel.Frontend
+include Netchannel.Frontend.Make(Netchannel.Xenstore.Make(OS.Xs))

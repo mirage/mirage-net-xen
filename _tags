@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: 38e0d9619888dcfdace143a6c8b97946)
+# DO NOT EDIT (digest: 243763d51a321c579a873aa8843a2ebf)
 # Ignore VCS directories, you can use the same kind of rule outside
 # OASIS_START/STOP if you want to exclude directories that contains
 # useless stuff for the build process
@@ -21,6 +21,10 @@ true: annot, bin_annot
 "lib/resultM.cmx": for-pack(Netchannel)
 "lib/rX.cmx": for-pack(Netchannel)
 "lib/tX.cmx": for-pack(Netchannel)
+"lib/xenstore.cmx": for-pack(Netchannel)
+"lib/s.cmx": for-pack(Netchannel)
+"lib/features.cmx": for-pack(Netchannel)
+"lib/shared_page_pool.cmx": for-pack(Netchannel)
 <lib/*.ml{,i,y}>: pkg_cstruct
 <lib/*.ml{,i,y}>: pkg_cstruct.syntax
 <lib/*.ml{,i,y}>: pkg_ipaddr
@@ -45,5 +49,6 @@ true: annot, bin_annot
 # OASIS_STOP
 true: annot, bin_annot, debug, principal
 true: strict_sequence
-not (<lib/rX.*> or <lib/tX.*> or <lib/flag.*>): warn(A)
+not (<lib/rX.*> or <lib/tX.*> or <lib/flag.*> or <lib/s.*>): warn(A)
 <lib/rX.*> or <lib/tX.*> or <lib/flag.*>: pkg_cstruct.syntax, pkg_sexplib.syntax, warn(A-4-32)
+<lib/s.*> or <lib/features.*>: pkg_sexplib.syntax, warn(A-4)
