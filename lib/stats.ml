@@ -1,5 +1,6 @@
 (*
- * Copyright (c) 2011-2013 Anil Madhavapeddy <anil@recoil.org>
+ * Copyright (c) 2010-2013 Anil Madhavapeddy <anil@recoil.org>
+ * Copyright (c) 2014-2015 Citrix Inc
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,9 +15,25 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-(** Xen Netfront interface for Ethernet I/O. *)
-module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) : sig
-  include V1_LWT.NETWORK
+type t = {
+  mutable rx_bytes: int64;
+  mutable rx_pkts: int32;
+  mutable tx_bytes: int64;
+  mutable tx_pkts: int32;
+}
 
-  val connect : string -> [`Ok of t | `Error of error] io
-end
+let create () = { rx_pkts=0l; rx_bytes=0L; tx_pkts=0l; tx_bytes=0L }
+
+let rx t size =
+  t.rx_pkts <- Int32.succ t.rx_pkts;
+  t.rx_bytes <- Int64.add t.rx_bytes size
+
+let tx t size =
+  t.tx_pkts <- Int32.succ t.tx_pkts;
+  t.tx_bytes <- Int64.add t.tx_bytes size
+
+let reset t =
+  t.rx_bytes <- 0L;
+  t.rx_pkts  <- 0l;
+  t.tx_bytes <- 0L;
+  t.tx_pkts  <- 0l

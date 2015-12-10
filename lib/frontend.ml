@@ -54,11 +54,11 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     | `Disconnected      (** the device has been previously disconnected *)
   ]
 
-  type stats = {
+  type stats = Stats.t = {
     mutable rx_bytes : int64;
     mutable rx_pkts : int32;
     mutable tx_bytes : int64;
-    mutable tx_pkts : int32; 
+    mutable tx_pkts : int32;
   }
 
   type transport = {
@@ -129,7 +129,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     let rx_map = Hashtbl.create 1 in
     C.wait_until_backend_connected backend_conf >>= fun () ->
     Eventchn.unmask h evtchn;
-    let stats = { rx_pkts=0l;rx_bytes=0L;tx_pkts=0l;tx_bytes=0L } in
+    let stats = Stats.create () in
     let grant_tx_page = Gnt.Gntshr.grant_access ~domid:backend_id ~writable:false in
     let tx_pool = Shared_page_pool.make grant_tx_page in
     (* Register callback activation *)
@@ -177,8 +177,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
         match status with
         |sz when status > 0 ->
           let packet = Cstruct.sub (Io_page.to_cstruct page) 0 sz in
-          nf.stats.rx_pkts <- Int32.succ nf.stats.rx_pkts;
-          nf.stats.rx_bytes <- Int64.add nf.stats.rx_bytes (Int64.of_int sz);
+          Stats.rx nf.stats (Int64.of_int sz);
           Lwt.ignore_result 
             (try_lwt fn packet
              with exn -> return (printf "RX exn %s\n%!" (Printexc.to_string exn)))
@@ -260,8 +259,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       let len, datav = Cstruct.fillv ~src:datav ~dst:shared_block in
       (* [size] includes extra pages to follow later *)
       let size = match size with |None -> len |Some s -> s in
-      nf.t.stats.tx_pkts <- Int32.succ nf.t.stats.tx_pkts;
-      nf.t.stats.tx_bytes <- Int64.add nf.t.stats.tx_bytes (Int64.of_int size);
+      Stats.tx nf.t.stats (Int64.of_int size);
       let id = gref in
       let request = { TX.Request.
         id;
@@ -358,11 +356,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
 
   let get_stats_counters t = t.t.stats
 
-  let reset_stats_counters t =
-    t.t.stats.rx_bytes <- 0L;
-    t.t.stats.rx_pkts  <- 0l;
-    t.t.stats.tx_bytes <- 0L;
-    t.t.stats.tx_pkts  <- 0l
+  let reset_stats_counters t = Stats.reset t.t.stats
 
   let () =
     printf "Netif: add resume hook\n%!";
