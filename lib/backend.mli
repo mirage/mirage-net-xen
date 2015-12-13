@@ -14,43 +14,10 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
-open Result
 
-module Request : sig
-  type error = { impossible : 'a. 'a }  (* No errors *)
+module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) : sig
+  include V1_LWT.NETWORK
 
-  type t = {
-    gref: int32;
-    offset: int;
-    flags: Flags.t;
-    id: int;
-    size: int;
-  }
-
-  val write: t -> Cstruct.t -> unit
-
-  val read: Cstruct.t -> t ResultM.t
-
-  val flags: t -> Flags.t
-
-  val size: t -> (int, error) result
+  val make: domid:int -> device_id:int -> t Lwt.t
+  (** [make ~domid ~device_id] connects a backend connecting to [domid] *)
 end
-
-module Response : sig
-  type status =
-    | DROPPED
-    | ERROR
-    | OKAY
-    | NULL  (* No response: used for auxiliary requests (e.g., xen_netif_extra_info). *)
-
-  type t = {
-    id: int;
-    status: status;
-  }
-
-  val write: t -> Cstruct.t -> unit
-
-  val read: Cstruct.t -> t
-end
-
-val total_size: int

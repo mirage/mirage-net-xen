@@ -40,7 +40,9 @@ module Make(F : FRAME_MSG) = struct
       | msg :: rest ->
           match F.size msg with
           | Error _ as e -> e
-          | Ok size -> aux ({size; msg} :: acc) rest in
+          | Ok size ->
+              assert (size > 0 && size <= Io_page.page_size);
+              aux ({size; msg} :: acc) rest in
     aux []
 
   let make_frame ~first ~rest =
@@ -51,7 +53,7 @@ module Make(F : FRAME_MSG) = struct
     | Error e -> Error (e, (first :: rest))
     | Ok rest ->
     let first_size = List.fold_left (fun acc f -> acc - f.size) total_size rest in
-    assert (first_size > 0);
+    assert (first_size >= 0 && first_size <= Io_page.page_size);
     let first = { size = first_size; msg = first } in
     Ok {
       total_size;

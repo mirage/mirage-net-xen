@@ -1,0 +1,207 @@
+(*
+ * Copyright (c) 2010-2013 Anil Madhavapeddy <anil@recoil.org>
+ * Copyright (c) 2014-2015 Citrix Inc
+ * Copyright (c) 2015 Thomas Leonard <talex5@gmail.com>
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ *)
+
+open Lwt.Infix
+open Result
+
+let return = Lwt.return
+
+module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
+  type +'a io = 'a Lwt.t
+  type id = unit  (* Remove once mirage-types removes it *)
+  type macaddr = Macaddr.t
+  type buffer = Cstruct.t
+  type page_aligned_buffer = Io_page.t
+  type error = [
+    | `Unknown of string
+    | `Unimplemented
+    | `Disconnected
+  ]
+
+  type stats = Stats.t = {
+    mutable rx_bytes : int64;
+    mutable rx_pkts : int32;
+    mutable tx_bytes : int64;
+    mutable tx_pkts : int32; 
+  }
+
+  type t = {
+    channel: Eventchn.t;
+    frontend_id: int;
+    mac: Macaddr.t;
+    backend_configuration: S.backend_configuration;
+    to_netfront: (RX.Response.t,int) Ring.Rpc.Back.t;
+    rx_reqs: RX.Request.t Lwt_sequence.t;         (* Grants we can write into *)
+    from_netfront: (TX.Response.t,int) Ring.Rpc.Back.t;
+    stats: Stats.t;
+    write_mutex: Lwt_mutex.t;
+    get_free_mutex: Lwt_mutex.t;
+  }
+
+  let h = Eventchn.init ()
+  let gnttab = Gnt.Gnttab.interface_open ()
+
+  (* TODO: free resources on error *)
+  let make ~domid ~device_id =
+    let id = `Server (domid, device_id) in
+    C.read_mac id >>= fun mac ->
+    C.init_backend id Features.supported >>= fun backend_configuration ->
+    let frontend_id = backend_configuration.S.frontend_id in
+    C.read_frontend_configuration id >>= fun f ->
+    let channel = Eventchn.bind_interdomain h frontend_id (int_of_string f.S.event_channel) in
+    (* Note: TX and RX are from netfront's point of view (e.g. we receive on TX). *)
+    let from_netfront =
+      let tx_gnt = {Gnt.Gnttab.domid = frontend_id; ref = Int32.to_int f.S.tx_ring_ref} in
+      let mapping = Gnt.Gnttab.map_exn gnttab tx_gnt true in
+      let buf = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+      let sring = Ring.Rpc.of_buf ~buf ~idx_size:TX.total_size
+        ~name:("Netif.Backend.TX." ^ backend_configuration.S.backend) in
+      Ring.Rpc.Back.init ~sring in
+    let to_netfront =
+      let rx_gnt = {Gnt.Gnttab.domid = frontend_id; ref = Int32.to_int f.S.rx_ring_ref} in
+      let mapping = Gnt.Gnttab.map_exn gnttab rx_gnt true in
+      let buf = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+      let sring = Ring.Rpc.of_buf ~buf ~idx_size:RX.total_size
+        ~name:("Netif.Backend.RX." ^ backend_configuration.S.backend) in
+      Ring.Rpc.Back.init ~sring in
+    let stats = Stats.create () in
+    let rx_reqs = Lwt_sequence.create () in
+    Eventchn.unmask h channel;
+    C.connect id >>= fun () ->
+    let write_mutex = Lwt_mutex.create () in
+    let get_free_mutex = Lwt_mutex.create () in
+    return { channel; frontend_id; backend_configuration;
+             to_netfront; from_netfront; rx_reqs;
+             get_free_mutex; write_mutex;
+             stats; mac }
+
+  (* Loop checking for incoming requests on the from_netfront ring.
+     Frames received will go to [fn]. *)
+  let listen (t: t) fn : unit Lwt.t =
+    let module Recv = Assemble.Make(TX.Request) in
+    let rec loop after =
+      let q = ref [] in
+      Ring.Rpc.Back.ack_requests t.from_netfront
+        (fun slot ->
+          match TX.Request.read slot with
+          | Error msg -> Printf.printf "Netif.Backend.read_read TX has unparseable request: %s" msg
+          | Ok req ->
+            q := req :: !q
+        );
+      (* -- at this point the ring slots may be overwritten, but the grants are still valid *)
+      List.rev !q
+      |> Recv.group_frames
+      |> Lwt_list.iter_s (function
+        | Error (e, _) -> e.TX.Request.impossible
+        | Ok frame ->
+            let data = Cstruct.create frame.Recv.total_size in
+            let next = ref 0 in
+            frame.Recv.fragments |> Lwt_list.iter_s (fun {Recv.size; msg} ->
+              let { TX.Request.flags = _; size = _; offset; gref; id } = msg in
+              let gnt = { Gnt.Gnttab.
+                domid = t.frontend_id;
+                ref = Int32.to_int gref
+              } in
+              Gnt.Gnttab.with_mapping gnttab gnt false (function
+                | None -> failwith "Failed to map grant"
+                | Some mapping ->
+                    let buf = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+                    Cstruct.blit buf offset data !next size;
+                    next := !next + size;
+                    let slot = Ring.Rpc.Back.(slot t.from_netfront (next_res_id t.from_netfront)) in
+                    let resp = { TX.Response.id; status = TX.Response.OKAY } in
+                    TX.Response.write resp slot;
+                    return ()
+              )
+            ) >|= fun () ->
+            assert (!next = Cstruct.len data);
+            Stats.rx t.stats (Int64.of_int (Cstruct.len data));
+            Lwt.async (fun () -> fn data)
+      )
+      >>= fun () ->
+      let notify = Ring.Rpc.Back.push_responses_and_check_notify t.from_netfront in
+      if notify then Eventchn.notify h t.channel;
+      OS.Activations.after t.channel after
+      >>= loop in
+    loop OS.Activations.program_start
+
+  (* We need [n] pages to send a packet to the frontend. The Ring.Back API
+     gives us all the requests that are available at once. Since we may need
+     fewer of this, stash them in the t.rx_reqs sequence. *)
+  let get_n_grefs t n =
+    let rec take seq = function
+    | 0 -> []
+    | n -> Lwt_sequence.take_l seq :: (take seq (n - 1)) in
+    let rec loop after =
+      let n' = Lwt_sequence.length t.rx_reqs in
+      if n' >= n then return (take t.rx_reqs n)
+      else begin
+        Ring.Rpc.Back.ack_requests t.to_netfront
+          (fun slot ->
+            let req = RX.Request.read slot in
+            ignore(Lwt_sequence.add_r req t.rx_reqs)
+          );
+        if Lwt_sequence.length t.rx_reqs <> n'
+        then loop after
+        else OS.Activations.after t.channel after >>= loop
+      end in
+    (* We lock here so that we handle one frame at a time.
+       Otherwise, we might divide the free pages among lots of
+       waiters and deadlock. *)
+    Lwt_mutex.with_lock t.get_free_mutex (fun () ->
+      loop OS.Activations.program_start
+    )
+
+  let writev t buf =
+    let total_size = Cstruct.lenv buf in
+    let pages_needed = max 1 @@ Io_page.round_to_page_size total_size / Io_page.page_size in
+    (* Collect enough free pages from the client. *)
+    get_n_grefs t pages_needed
+    >>= fun reqs ->
+    Lwt_mutex.with_lock t.write_mutex (fun () ->
+      let rec fill_reqs ~src ~is_first = function
+        | r :: rs ->
+            let gnt = {Gnt.Gnttab.domid = t.frontend_id; ref = Int32.to_int r.RX.Request.gref} in
+            let mapping = Gnt.Gnttab.map_exn gnttab gnt true in
+            let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+            let len, src = Cstruct.fillv ~src ~dst in
+            Gnt.Gnttab.unmap_exn gnttab mapping;
+            let slot = Ring.Rpc.Back.(slot t.to_netfront (next_res_id t.to_netfront)) in
+            let size = Ok (if is_first then total_size else len) in
+            let flags = if rs = [] then Flags.empty else Flags.more_data in
+            let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
+            RX.Response.write resp slot;
+            fill_reqs ~src ~is_first:false rs
+        | [] when Cstruct.lenv src = 0 -> ()
+        | [] -> failwith "BUG: not enough pages for data!" in
+      fill_reqs ~src:buf ~is_first:true reqs;
+      Stats.tx t.stats (Int64.of_int total_size);
+      return ()
+    ) >|= fun () ->
+    if Ring.Rpc.Back.push_responses_and_check_notify t.to_netfront
+    then Eventchn.notify h t.channel
+
+  let write t buf = writev t [buf]
+
+  let get_stats_counters t = t.stats
+  let reset_stats_counters t = Stats.reset t.stats
+
+  let mac t = t.mac
+  
+  let disconnect _t = failwith "TODO: disconnect"
+end
