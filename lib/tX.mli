@@ -19,7 +19,7 @@ module Request : sig
   type t = {
     gref: int32;
     offset: int;
-    flags: Flag.t list;
+    flags: Flags.t;
     id: int;
     size: int;
   }

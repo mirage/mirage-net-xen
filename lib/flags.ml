@@ -14,14 +14,21 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
+open Sexplib.Std
 
-type t =
-| Checksum_blank
-| Data_validated
-| More_data
-| Extra_info
-with sexp
+type t = int with sexp
 
-val unmarshal: int -> t list ResultM.t
+let empty          = 0
 
-val marshal: t list -> int
+let checksum_blank = 1
+let data_validated = 2
+let more_data      = 4
+let extra_info     = 8
+
+let of_int x = x
+let to_int x = x
+
+let (++) = (lor)
+let (--) a b = a land (lnot b)
+let mem a b = 
+  (a land b) = a

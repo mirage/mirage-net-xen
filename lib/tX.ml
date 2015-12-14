@@ -20,7 +20,7 @@ module Request = struct
   type t = {
     gref: int32;
     offset: int;
-    flags: Flag.t list;
+    flags: Flags.t;
     id: int;
     size: int;
   }
@@ -34,7 +34,7 @@ module Request = struct
   } as little_endian
 
   let write t slot =
-    let flags = Flag.marshal t.flags in
+    let flags = Flags.to_int t.flags in
     set_req_gref slot t.gref;
     set_req_offset slot t.offset;
     set_req_flags slot flags;
@@ -52,9 +52,7 @@ module Request = struct
     let offset = get_req_offset slot in
     within_page "TX.Request.offset" offset
     >>= fun offset ->
-    let flags = get_req_flags slot in
-    Flag.unmarshal flags
-    >>= fun flags ->
+    let flags = Flags.of_int (get_req_flags slot) in
     let id = get_req_id slot in
     let size = get_req_size slot in
     within_page "TX.Request.size" size

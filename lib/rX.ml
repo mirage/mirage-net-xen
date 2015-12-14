@@ -43,7 +43,7 @@ module Response = struct
   type t = {
     id: int;
     offset: int;
-    flags: Flag.t list;
+    flags: Flags.t;
     status: int;
   } with sexp
 
@@ -65,16 +65,14 @@ module Response = struct
     let offset = get_resp_offset slot in
     within_page "RX.Response.offset" offset
     >>= fun offset ->
-    let flags = get_resp_flags slot in
-    Flag.unmarshal flags
-    >>= fun flags ->
+    let flags = Flags.of_int (get_resp_flags slot) in
     let status = get_resp_status slot in
     return { id; offset; flags; status }
 
   let write t slot =
     set_resp_id slot t.id;
     set_resp_offset slot t.offset;
-    set_resp_flags slot (Flag.marshal t.flags);
+    set_resp_flags slot (Flags.to_int t.flags);
     set_resp_status slot t.status
 end
 

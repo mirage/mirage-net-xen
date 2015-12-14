@@ -30,7 +30,7 @@ module Response : sig
   type t = {
     id: int;
     offset: int;
-    flags: Flag.t list;
+    flags: Flags.t;
     status: int;
   } with sexp
 

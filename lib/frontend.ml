@@ -284,7 +284,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   (* Transmit a packet from buffer, with offset and length.
    * The buffer's data must fit in a single block. *)
   let write_already_locked nf datav =
-    lwt remaining, th = write_request ~flags:[] nf datav in
+    lwt remaining, th = write_request ~flags:Flags.empty nf datav in
     assert (Cstruct.lenv remaining = 0);
     Lwt_ring.Front.push nf.t.tx_client (notify nf.t);
     return th
@@ -306,15 +306,15 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
             * length, which the backend will use to consume the remaining
             * fragments until the full length is satisfied *)
            lwt datav, first_th =
-             write_request ~flags:[Flag.More_data] ~size nf datav in
+             write_request ~flags:Flags.more_data ~size nf datav in
            let rec xmit datav = function
              | 0 -> return []
              | 1 ->
-                 lwt datav, th = write_request ~flags:[] nf datav in
+                 lwt datav, th = write_request ~flags:Flags.empty nf datav in
                  assert (Cstruct.lenv datav = 0);
                  return [ th ]
              | n ->
-                 lwt datav, next_th = write_request ~flags:[Flag.More_data] nf datav in
+                 lwt datav, next_th = write_request ~flags:Flags.more_data nf datav in
                  lwt rest = xmit datav (n - 1) in
                  return (next_th :: rest) in
            lwt rest_th = xmit datav (n - 1) in
