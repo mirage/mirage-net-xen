@@ -63,9 +63,16 @@ module Request = struct
 end
 
 module Response = struct
+  cenum status {
+    DROPPED = 0xfffe;
+    ERROR   = 0xffff;
+    OKAY    = 0;
+    NULL    = 1;
+  } as int16_t
+
   type t = {
     id: int;
-    status: int;
+    status: status;
   }
 
   cstruct resp {
@@ -75,12 +82,14 @@ module Response = struct
 
   let write t slot =
     set_resp_status slot t.id;
-    set_resp_status slot t.status
+    set_resp_status slot (status_to_int t.status)
 
   let read slot =
     let id = get_resp_id slot in
-    let status = get_resp_status slot in
-    { id; status }
+    let st = get_resp_status slot in
+    match int_to_status st with
+    | None -> failwith (Printf.sprintf "Invalid TX.Response.status %d" st)
+    | Some status -> { id; status }
 end
 
 let total_size = max Request.sizeof_req Response.sizeof_resp

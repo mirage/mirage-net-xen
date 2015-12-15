@@ -271,7 +271,13 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       lwt replied = Lwt_ring.Front.write nf.t.tx_client
           (fun slot -> TX.Request.write request slot; id) in
       (* request has been written; when replied returns we have a reply *)
-      let release = replied >>= fun _ -> return () in
+      let release = replied >>= fun reply ->
+        let open TX.Response in
+        match reply.status with
+        | DROPPED -> failwith "Netif: backend dropped our frame"
+        | NULL -> failwith "Netif: NULL response"
+        | ERROR -> failwith "Netif: ERROR response"
+        | OKAY -> return () in
       return (datav, release)
     )
 

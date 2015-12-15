@@ -30,9 +30,15 @@ module Request : sig
 end
 
 module Response : sig
+  type status =
+    | DROPPED
+    | ERROR
+    | OKAY
+    | NULL  (* No response: used for auxiliary requests (e.g., xen_netif_extra_info). *)
+
   type t = {
     id: int;
-    status: int;
+    status: status;
   }
 
   val write: t -> Cstruct.t -> unit
