@@ -64,16 +64,23 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   type transport = {
     vif_id: int;
     backend_id: int;
-    backend: string;
+    backend: string;      (* Path in XenStore *)
     mac: Macaddr.t;
+
+    (* To transmit, we take half-pages from [Shared_page_pool], copy the data to them,
+       and push the ref to the ring. *)
     tx_client: (TX.Response.t,int) Lwt_ring.Front.t;
     tx_gnt: Gnt.gntref;
     tx_mutex: Lwt_mutex.t; (* Held to avoid signalling between fragments *)
     tx_pool: Shared_page_pool.t;
+
+    (* To receive, we share set of whole pages with the backend. We put the details of
+       these grants in the rx_ring and wait to be notified that they've been used. *)
     rx_fring: (RX.Response.t,int) Ring.Rpc.Front.t;
     rx_client: (RX.Response.t,int) Lwt_ring.Front.t;
     rx_map: (int, Gnt.gntref * Io_page.t) Hashtbl.t;
     rx_gnt: Gnt.gntref;
+
     evtchn: Eventchn.t;
     features: Features.t;
     stats : stats;
@@ -82,7 +89,6 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   type t = {
     mutable t: transport;
     mutable resume_fns: (t -> unit Lwt.t) list;
-    mutable receive_callback: Cstruct.t -> unit Lwt.t;
     l : Lwt_mutex.t;
     c : unit Lwt_condition.t;
   }
@@ -164,25 +170,47 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       return ()
     else return ()
 
-  let rx_poll nf (fn: Cstruct.t -> unit Lwt.t) =
-    MProf.Trace.label "Netif.rx_poll";
+  let pop_rx_page nf id =
+    let gref, page = Hashtbl.find nf.rx_map id in
+    Hashtbl.remove nf.rx_map id;
+    Gnt.Gntshr.end_access gref;
+    Gnt.Gntshr.put gref;
+    page
+
+  let rx_poll nf fn =
+    let module Recv = Assemble.Make(RX.Response) in
+    MProf.Trace.label "Netchannel.Frontend.rx_poll";
+    let q = ref [] in
     Ring.Rpc.Front.ack_responses nf.rx_fring (fun slot ->
-        match RX.Response.read slot with
-        | Error msg -> failwith msg
-        | Ok {RX.Response.id; size; _} ->
-        let gref, page = Hashtbl.find nf.rx_map id in
-        Hashtbl.remove nf.rx_map id;
-        Gnt.Gntshr.end_access gref;
-        Gnt.Gntshr.put gref;
-        match size with
-        | Ok sz ->
-          let packet = Cstruct.sub (Io_page.to_cstruct page) 0 sz in
-          Stats.rx nf.stats (Int64.of_int sz);
-          Lwt.ignore_result 
-            (try_lwt fn packet
-             with exn -> return (printf "RX exn %s\n%!" (Printexc.to_string exn)))
-        | Error err -> printf "RX error %d\n%!" err
-      )
+      match RX.Response.read slot with
+      | Error msg -> failwith msg
+      | Ok req -> q := req :: !q
+    );
+    List.rev !q
+    |> Recv.group_frames
+    |> List.iter (function
+      | Error (e, msgs) ->
+          msgs |> List.iter (fun msg ->
+            let _ : Io_page.t = pop_rx_page nf msg.RX.Response.id in
+            ()
+          );
+          printf "Netif: received error: %d" e
+      | Ok frame ->
+          let data = Cstruct.create frame.Recv.total_size in
+          let next = ref 0 in
+          frame.Recv.fragments |> List.iter (fun {Recv.size; msg} ->
+            let {RX.Response.id; size = _; flags = _; offset} = msg in
+            let page = pop_rx_page nf id in
+            let buf = Io_page.to_cstruct page in
+            Cstruct.blit buf offset data !next size;
+            next := !next + size
+          );
+          assert (!next = Cstruct.len data);
+          Lwt.async (fun () ->
+            Stats.rx nf.stats (Int64.of_int (Cstruct.len data));
+            fn data
+          )
+    )
 
   let tx_poll nf =
     MProf.Trace.label "Netif.tx_poll";
@@ -191,9 +219,10 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       (resp.TX.Response.id, resp)
     )
 
-  let poll_thread (nf: t) : unit Lwt.t =
+  let listen nf receive_callback =
+    MProf.Trace.label "Netchannel.Frontend.listen";
     let rec loop from =
-      rx_poll nf.t nf.receive_callback;
+      rx_poll nf.t receive_callback;
       refill_requests nf.t >>= fun () ->
       tx_poll nf.t;
       Activations.after nf.t.evtchn from >>= fun from ->
@@ -226,9 +255,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
             let l = Lwt_mutex.create () in
             let c = Lwt_condition.create () in
             (* packets are dropped until listen is called *)
-            let receive_callback = fun _ -> return () in
-            let dev = { t; resume_fns=[]; receive_callback; l; c } in
-            let (_: unit Lwt.t) = poll_thread dev in
+            let dev = { t; resume_fns=[]; l; c } in
             Hashtbl.add devices id' dev;
             return (`Ok dev)
           with exn ->
@@ -246,6 +273,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
      to Xenstore? XXX *)
   let disconnect t =
     printf "Netif: disconnect\n%!";
+    (* TODO: free pages still in [t.rx_map] *)
     Shared_page_pool.shutdown t.t.tx_pool;
     Hashtbl.remove devices t.t.vif_id;
     return ()
@@ -334,13 +362,6 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     return ()
 
   let write nf data = writev nf [data]
-
-  let listen nf fn =
-    (* packets received from this point on will go to [fn]. Historical
-       packets have not been stored: we don't want to buffer the network *)
-    nf.receive_callback <- fn;
-    let t, _ = MProf.Trace.named_task "Netif.listen" in
-    t (* never return *)
 
   let resume (id,t) =
     lwt transport = plug_inner id in

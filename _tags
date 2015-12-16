@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: 1afdfa56ecaf227d7cb4c2172e3e625b)
+# DO NOT EDIT (digest: 282b791d3081fe318641dbdc9f8fd71f)
 # Ignore VCS directories, you can use the same kind of rule outside
 # OASIS_START/STOP if you want to exclude directories that contains
 # useless stuff for the build process
@@ -26,6 +26,7 @@ true: annot, bin_annot
 "lib/tX.cmx": for-pack(Netchannel)
 "lib/features.cmx": for-pack(Netchannel)
 "lib/shared_page_pool.cmx": for-pack(Netchannel)
+"lib/assemble.cmx": for-pack(Netchannel)
 <lib/*.ml{,i,y}>: pkg_cstruct
 <lib/*.ml{,i,y}>: pkg_cstruct.syntax
 <lib/*.ml{,i,y}>: pkg_ipaddr

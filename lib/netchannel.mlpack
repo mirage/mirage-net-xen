@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: 6175510579dfd7d684985dfc02b4c417)
+# DO NOT EDIT (digest: f12c22ee08ee25b031f4edb8edecc013)
 Frontend
 Xenstore
 S
@@ -10,4 +10,5 @@ RX
 TX
 Features
 Shared_page_pool
+Assemble
 # OASIS_STOP
