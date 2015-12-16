@@ -15,6 +15,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
+open Result
+
 module Request : sig
   type t = {
     id: int;
@@ -27,16 +29,22 @@ module Request : sig
 end
 
 module Response : sig
+  type error = int    (* Always negative *)
+
   type t = {
     id: int;
     offset: int;
     flags: Flags.t;
-    status: int;
-  } with sexp
+    size: (int, error) result;
+  }
 
   val read: Cstruct.t -> t ResultM.t
 
   val write: t -> Cstruct.t -> unit
+
+  val flags: t -> Flags.t
+
+  val size: t -> (int, error) result
 end
 
 val total_size: int

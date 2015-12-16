@@ -40,18 +40,20 @@ module Request = struct
 end
 
 module Response = struct
+  type error = int
+
   type t = {
     id: int;
     offset: int;
     flags: Flags.t;
-    status: int;
-  } with sexp
+    size: (int, error) result;
+  }
 
   cstruct resp {
     uint16_t       id;
     uint16_t       offset;
     uint16_t       flags;
-    uint16_t       status
+    uint16_t       status;  (* Negative => Err, else Size *)
   } as little_endian
 
   let within_page name x =
@@ -66,14 +68,26 @@ module Response = struct
     within_page "RX.Response.offset" offset
     >>= fun offset ->
     let flags = Flags.of_int (get_resp_flags slot) in
-    let status = get_resp_status slot in
-    return { id; offset; flags; status }
+    let size =
+      match get_resp_status slot with
+      | status when status > 0 -> Ok status
+      | status -> Error status in
+    return { id; offset; flags; size }
 
   let write t slot =
     set_resp_id slot t.id;
     set_resp_offset slot t.offset;
     set_resp_flags slot (Flags.to_int t.flags);
-    set_resp_status slot t.status
+    match t.size with
+    | Ok size ->
+        assert (size > 0);
+        set_resp_status slot size
+    | Error st ->
+        assert (st < 0);
+        set_resp_status slot st
+
+  let flags t = t.flags
+  let size t = t.size
 end
 
 let total_size = max Request.sizeof_req Response.sizeof_resp

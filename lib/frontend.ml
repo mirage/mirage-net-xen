@@ -169,19 +169,19 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     Ring.Rpc.Front.ack_responses nf.rx_fring (fun slot ->
         match RX.Response.read slot with
         | Error msg -> failwith msg
-        | Ok {RX.Response.id; status; _} ->
+        | Ok {RX.Response.id; size; _} ->
         let gref, page = Hashtbl.find nf.rx_map id in
         Hashtbl.remove nf.rx_map id;
         Gnt.Gntshr.end_access gref;
         Gnt.Gntshr.put gref;
-        match status with
-        |sz when status > 0 ->
+        match size with
+        | Ok sz ->
           let packet = Cstruct.sub (Io_page.to_cstruct page) 0 sz in
           Stats.rx nf.stats (Int64.of_int sz);
           Lwt.ignore_result 
             (try_lwt fn packet
              with exn -> return (printf "RX exn %s\n%!" (Printexc.to_string exn)))
-        |err -> printf "RX error %d\n%!" err
+        | Error err -> printf "RX error %d\n%!" err
       )
 
   let tx_poll nf =
