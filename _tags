@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: 0f5ca7659b12bf5960e17a86f968a835)
+# DO NOT EDIT (digest: 26e0601531e70af275d65034a3f4fb0c)
 # Ignore VCS directories, you can use the same kind of rule outside
 # OASIS_START/STOP if you want to exclude directories that contains
 # useless stuff for the build process
@@ -14,16 +14,44 @@ true: annot, bin_annot
 ".git": not_hygienic
 "_darcs": -traverse
 "_darcs": not_hygienic
-# Library mirage-net-xen
-"lib/mirage-net-xen.cmxs": use_mirage-net-xen
+# Library netchannel
+"lib/netchannel.cmxs": use_netchannel
+"lib/frontend.cmx": for-pack(Netchannel)
+"lib/backend.cmx": for-pack(Netchannel)
+"lib/xenstore.cmx": for-pack(Netchannel)
+"lib/s.cmx": for-pack(Netchannel)
+"lib/stats.cmx": for-pack(Netchannel)
+"lib/flags.cmx": for-pack(Netchannel)
+"lib/resultM.cmx": for-pack(Netchannel)
+"lib/rX.cmx": for-pack(Netchannel)
+"lib/tX.cmx": for-pack(Netchannel)
+"lib/features.cmx": for-pack(Netchannel)
+"lib/shared_page_pool.cmx": for-pack(Netchannel)
+"lib/assemble.cmx": for-pack(Netchannel)
 <lib/*.ml{,i,y}>: pkg_cstruct
 <lib/*.ml{,i,y}>: pkg_cstruct.syntax
 <lib/*.ml{,i,y}>: pkg_ipaddr
 <lib/*.ml{,i,y}>: pkg_lwt.syntax
 <lib/*.ml{,i,y}>: pkg_mirage-profile
 <lib/*.ml{,i,y}>: pkg_mirage-xen
+<lib/*.ml{,i,y}>: pkg_result
 <lib/*.ml{,i,y}>: pkg_xen-evtchn
 <lib/*.ml{,i,y}>: pkg_xen-gnt
+# Library mirage-net-xen
+"compat/mirage-net-xen.cmxs": use_mirage-net-xen
+<compat/*.ml{,i,y}>: pkg_cstruct
+<compat/*.ml{,i,y}>: pkg_cstruct.syntax
+<compat/*.ml{,i,y}>: pkg_ipaddr
+<compat/*.ml{,i,y}>: pkg_lwt.syntax
+<compat/*.ml{,i,y}>: pkg_mirage-profile
+<compat/*.ml{,i,y}>: pkg_mirage-xen
+<compat/*.ml{,i,y}>: pkg_result
+<compat/*.ml{,i,y}>: pkg_xen-evtchn
+<compat/*.ml{,i,y}>: pkg_xen-gnt
+<compat/*.ml{,i,y}>: use_netchannel
 # OASIS_STOP
 true: annot, bin_annot, debug, principal
-true: warn(A-27-32-34-37), strict_sequence
+true: strict_sequence
+not (<lib/rX.*> or <lib/tX.*> or <lib/flag.*> or <lib/s.*>): warn(A)
+<lib/rX.*> or <lib/tX.*> or <lib/flags.*>: pkg_cstruct.syntax, pkg_sexplib.syntax, warn(A-4-32)
+<lib/s.*> or <lib/features.*>: pkg_sexplib.syntax, warn(A-4)

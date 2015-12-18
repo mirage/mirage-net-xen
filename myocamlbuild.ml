@@ -1,5 +1,5 @@
 (* OASIS_START *)
-(* DO NOT EDIT (digest: 6e92915623607c0fa2f71740aee41e72) *)
+(* DO NOT EDIT (digest: 7e07b4a21acf7ce1cf18cc1a6428dca4) *)
 module OASISGettext = struct
 (* # 22 "src/oasis/OASISGettext.ml" *)
 
@@ -607,10 +607,11 @@ end
 open Ocamlbuild_plugin;;
 let package_default =
   {
-     MyOCamlbuildBase.lib_ocaml = [("mirage-net-xen", ["lib"], [])];
+     MyOCamlbuildBase.lib_ocaml =
+       [("netchannel", ["lib"], []); ("mirage-net-xen", ["compat"], [])];
      lib_c = [];
      flags = [];
-     includes = []
+     includes = [("compat", ["lib"])]
   }
   ;;
 
@@ -618,6 +619,6 @@ let conf = {MyOCamlbuildFindlib.no_automatic_syntax = false}
 
 let dispatch_default = MyOCamlbuildBase.dispatch_default conf package_default;;
 
-# 622 "myocamlbuild.ml"
+# 623 "myocamlbuild.ml"
 (* OASIS_STOP *)
 Ocamlbuild_plugin.dispatch dispatch_default;;

@@ -1,12 +1,13 @@
 # OASIS_START
-# DO NOT EDIT (digest: 713930c70b475a8d0a83d1d91098c5c8)
+# DO NOT EDIT (digest: f9deac9fec6a6c0c8cb499b0422d2a8b)
 version = "1.4.1"
 description = "Xen network frontend driver implementation"
-requires = "lwt cstruct ipaddr mirage-xen xen-evtchn xen-gnt mirage-profile"
-archive(byte) = "mirage-net-xen.cma"
-archive(byte, plugin) = "mirage-net-xen.cma"
-archive(native) = "mirage-net-xen.cmxa"
-archive(native, plugin) = "mirage-net-xen.cmxs"
-exists_if = "mirage-net-xen.cma"
+requires =
+"lwt cstruct ipaddr mirage-xen xen-evtchn xen-gnt mirage-profile result"
+archive(byte) = "netchannel.cma"
+archive(byte, plugin) = "netchannel.cma"
+archive(native) = "netchannel.cmxa"
+archive(native, plugin) = "netchannel.cmxs"
+exists_if = "netchannel.cma"
 # OASIS_STOP
 

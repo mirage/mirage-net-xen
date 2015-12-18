@@ -1,5 +1,5 @@
 (*
- * Copyright (c) 2011-2013 Anil Madhavapeddy <anil@recoil.org>
+ * Copyright (c) 2013,2014 Citrix Systems Inc
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,12 +14,5 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-(** Xen Netfront interface for Ethernet I/O. *)
-include V1.NETWORK
-with type 'a io = 'a Lwt.t
-and type     page_aligned_buffer = Io_page.t
-and type     buffer = Cstruct.t
-and type     id = string
-and type     macaddr = Macaddr.t
-
-val connect : string -> [`Ok of t | `Error of error] io
+module Make(Xs: Xs_client_lwt.S) : S.CONFIGURATION
+  with type 'a io = 'a Lwt.t
