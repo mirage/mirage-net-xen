@@ -283,12 +283,11 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
    * remaining (unsent) data and a thread which will return when the data has
    * been ack'd by netback. *)
   let write_request ?size ~flags nf datav =
-    Shared_page_pool.use nf.t.tx_pool (fun gref shared_block ->
+    Shared_page_pool.use nf.t.tx_pool (fun ~id gref shared_block ->
       let len, datav = Cstruct.fillv ~src:datav ~dst:shared_block in
       (* [size] includes extra pages to follow later *)
       let size = match size with |None -> len |Some s -> s in
       Stats.tx nf.t.stats (Int64.of_int size);
-      let id = gref in
       let request = { TX.Request.
         id;
         gref = Int32.of_int gref;
