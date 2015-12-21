@@ -88,7 +88,7 @@ module Response = struct
   } as little_endian
 
   let write t slot =
-    set_resp_status slot t.id;
+    set_resp_id slot t.id;
     set_resp_status slot (status_to_int t.status)
 
   let read slot =
