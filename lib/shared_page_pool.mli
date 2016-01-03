@@ -24,8 +24,9 @@ val make : (Gnt.gntref -> Io_page.t -> unit) -> t
 (** [make grant_access] is a shared pool of blocks. When a new page is first
     allocated, [grant_access] is called to share it. *)
 
-val use : t -> (Gnt.gntref -> Cstruct.t -> ('a * unit Lwt.t) Lwt.t) -> ('a * unit Lwt.t) Lwt.t
-(** [use t fn] calls [fn gref block] with a free shared block of memory.
+val use : t -> (id:Cstruct.uint16 -> Gnt.gntref -> Cstruct.t -> ('a * unit Lwt.t) Lwt.t) -> ('a * unit Lwt.t) Lwt.t
+(** [use t fn] calls [fn ~id gref block] with a free shared block of memory
+    and that block's unique ID (note: the [gref] is NOT unique).
     The function should return a thread that indicates when the request has
     been added to the queue, by returning a result value and a second thread
     indicating when the block can be returned to the pool. *)
