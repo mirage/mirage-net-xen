@@ -22,6 +22,8 @@ open Result
 let return = Lwt.return
 
 module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
+  exception Netback_shutdown
+
   type +'a io = 'a Lwt.t
   type id = unit  (* Remove once mirage-types removes it *)
   type macaddr = Macaddr.t
@@ -45,9 +47,9 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     frontend_id: int;
     mac: Macaddr.t;
     backend_configuration: S.backend_configuration;
-    to_netfront: (RX.Response.t,int) Ring.Rpc.Back.t;
+    mutable to_netfront: (RX.Response.t,int) Ring.Rpc.Back.t option;
     rx_reqs: RX.Request.t Lwt_sequence.t;         (* Grants we can write into *)
-    from_netfront: (TX.Response.t,int) Ring.Rpc.Back.t;
+    mutable from_netfront: (TX.Response.t,int) Ring.Rpc.Back.t option;
     stats: Stats.t;
     write_mutex: Lwt_mutex.t;
     get_free_mutex: Lwt_mutex.t;
@@ -56,18 +58,20 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   let h = Eventchn.init ()
   let gnttab = Gnt.Gnttab.interface_open ()
 
-  (* TODO: free resources on error *)
-  let make ~domid ~device_id =
+  let create ~switch ~domid ~device_id =
     let id = `Server (domid, device_id) in
+    Lwt_switch.add_hook (Some switch) (fun () -> C.disconnect_backend id);
     C.read_mac id >>= fun mac ->
     C.init_backend id Features.supported >>= fun backend_configuration ->
     let frontend_id = backend_configuration.S.frontend_id in
     C.read_frontend_configuration id >>= fun f ->
     let channel = Eventchn.bind_interdomain h frontend_id (int_of_string f.S.event_channel) in
+    Lwt_switch.add_hook (Some switch) (fun () -> Eventchn.unbind h channel; return ());
     (* Note: TX and RX are from netfront's point of view (e.g. we receive on TX). *)
     let from_netfront =
       let tx_gnt = {Gnt.Gnttab.domid = frontend_id; ref = Int32.to_int f.S.tx_ring_ref} in
       let mapping = Gnt.Gnttab.map_exn gnttab tx_gnt true in
+      Lwt_switch.add_hook (Some switch) (fun () -> Gnt.Gnttab.unmap_exn gnttab mapping; return ());
       let buf = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
       let sring = Ring.Rpc.of_buf ~buf ~idx_size:TX.total_size
         ~name:("Netif.Backend.TX." ^ backend_configuration.S.backend) in
@@ -75,6 +79,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     let to_netfront =
       let rx_gnt = {Gnt.Gnttab.domid = frontend_id; ref = Int32.to_int f.S.rx_ring_ref} in
       let mapping = Gnt.Gnttab.map_exn gnttab rx_gnt true in
+      Lwt_switch.add_hook (Some switch) (fun () -> Gnt.Gnttab.unmap_exn gnttab mapping; return ());
       let buf = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
       let sring = Ring.Rpc.of_buf ~buf ~idx_size:RX.total_size
         ~name:("Netif.Backend.RX." ^ backend_configuration.S.backend) in
@@ -85,18 +90,36 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     C.connect id >>= fun () ->
     let write_mutex = Lwt_mutex.create () in
     let get_free_mutex = Lwt_mutex.create () in
-    return { channel; frontend_id; backend_configuration;
-             to_netfront; from_netfront; rx_reqs;
-             get_free_mutex; write_mutex;
-             stats; mac }
+    let t = {
+      channel; frontend_id; backend_configuration;
+      to_netfront = Some to_netfront; from_netfront = Some from_netfront; rx_reqs;
+      get_free_mutex; write_mutex;
+      stats; mac; } in
+    Lwt_switch.add_hook (Some switch) (fun () ->
+      t.to_netfront <- None;
+      t.from_netfront <- None;
+      return ()
+    );
+    Lwt.async (fun () -> C.wait_for_backend_closing id >>= fun () -> Lwt_switch.turn_off switch);
+    return t
+
+  let make ~domid ~device_id =
+    let switch = Lwt_switch.create () in
+    Lwt.catch
+      (fun () -> create ~switch ~domid ~device_id)
+      (fun ex -> Lwt_switch.turn_off switch >>= fun () -> Lwt.fail ex)
 
   (* Loop checking for incoming requests on the from_netfront ring.
      Frames received will go to [fn]. *)
   let listen (t: t) fn : unit Lwt.t =
+    let from_netfront () =
+      match t.from_netfront with
+      | None -> raise Netback_shutdown
+      | Some x -> x in
     let module Recv = Assemble.Make(TX.Request) in
     let rec loop after =
       let q = ref [] in
-      Ring.Rpc.Back.ack_requests t.from_netfront
+      Ring.Rpc.Back.ack_requests (from_netfront ())
         (fun slot ->
           match TX.Request.read slot with
           | Error msg -> Printf.printf "Netif.Backend.read_read TX has unparseable request: %s" msg
@@ -123,7 +146,9 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
                     let buf = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
                     Cstruct.blit buf offset data !next size;
                     next := !next + size;
-                    let slot = Ring.Rpc.Back.(slot t.from_netfront (next_res_id t.from_netfront)) in
+                    let slot =
+                      let ring = from_netfront () in
+                      Ring.Rpc.Back.(slot ring (next_res_id ring)) in
                     let resp = { TX.Response.id; status = TX.Response.OKAY } in
                     TX.Response.write resp slot;
                     return ()
@@ -134,11 +159,16 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
             Lwt.async (fun () -> fn data)
       )
       >>= fun () ->
-      let notify = Ring.Rpc.Back.push_responses_and_check_notify t.from_netfront in
+      let notify = Ring.Rpc.Back.push_responses_and_check_notify (from_netfront ()) in
       if notify then Eventchn.notify h t.channel;
       OS.Activations.after t.channel after
       >>= loop in
     loop OS.Activations.program_start
+
+  let to_netfront t =
+    match t.to_netfront with
+    | None -> raise Netback_shutdown
+    | Some x -> x
 
   (* We need [n] pages to send a packet to the frontend. The Ring.Back API
      gives us all the requests that are available at once. Since we may need
@@ -151,7 +181,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       let n' = Lwt_sequence.length t.rx_reqs in
       if n' >= n then return (take t.rx_reqs n)
       else begin
-        Ring.Rpc.Back.ack_requests t.to_netfront
+        Ring.Rpc.Back.ack_requests (to_netfront t)
           (fun slot ->
             let req = RX.Request.read slot in
             ignore(Lwt_sequence.add_r req t.rx_reqs)
@@ -181,7 +211,9 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
             let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
             let len, src = Cstruct.fillv ~src ~dst in
             Gnt.Gnttab.unmap_exn gnttab mapping;
-            let slot = Ring.Rpc.Back.(slot t.to_netfront (next_res_id t.to_netfront)) in
+            let slot =
+              let ring = to_netfront t in
+              Ring.Rpc.Back.(slot ring (next_res_id ring)) in
             let size = Ok (if is_first then total_size else len) in
             let flags = if rs = [] then Flags.empty else Flags.more_data in
             let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
@@ -193,7 +225,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       Stats.tx t.stats (Int64.of_int total_size);
       return ()
     ) >|= fun () ->
-    if Ring.Rpc.Back.push_responses_and_check_notify t.to_netfront
+    if Ring.Rpc.Back.push_responses_and_check_notify (to_netfront t)
     then Eventchn.notify h t.channel
 
   let write t buf = writev t [buf]

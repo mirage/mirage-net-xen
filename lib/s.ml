@@ -51,6 +51,12 @@ module type CONFIGURATION = sig
 
   val connect: id -> unit io
 
+  val disconnect_frontend: id -> unit io
+  (** Set the frontend state to Closed. *)
+
+  val disconnect_backend: id -> unit io
+  (** Delete the backend directory. *)
+
   val wait_until_backend_connected: backend_configuration -> unit io
 
   val read_backend: id -> backend_configuration io
@@ -61,4 +67,12 @@ module type CONFIGURATION = sig
   val description: string
   (** Human-readable description suitable for help text or
       a manpage *)
+
+  val wait_for_frontend_closing: id -> unit io
+  (** [wait_for_frontend_closing id] is a thread that returns when
+      [id]'s frontend moves to the closing state. *)
+
+  val wait_for_backend_closing: id -> unit io
+  (** [wait_for_backend_closing id] is a thread that returns when
+      [id]'s backend moves to the closing state. *)
 end

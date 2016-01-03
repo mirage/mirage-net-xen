@@ -278,4 +278,33 @@ module Make(Xs: Xs_client_lwt.S) = struct
 
   let description = "Configuration information will be shared via Xenstore keys"
 
+  let closing path =
+    Xs.make ()
+    >>= fun xsc ->
+    Xs.wait xsc (fun h ->
+      Xs.read h (path / "state")
+      >>= fun state ->
+      if OS.Device_state.of_string state = OS.Device_state.Closing then return ()
+      else Lwt.fail Xs_protocol.Eagain
+    )
+
+  let wait_for_frontend_closing id = frontend id >>= closing
+  let wait_for_backend_closing id = backend id >>= closing
+
+  let disconnect_frontend id =
+    Xs.make ()
+    >>= fun xsc ->
+    frontend id
+    >>= fun path ->
+    Xs.(immediate xsc (fun h ->
+      write h (path / "state") OS.Device_state.(to_string Closed)
+    ))
+
+  (* See: https://github.com/mirage/xen/commit/546678c6a60f64fb186640460dfa69a837c8fba5 *)
+  let disconnect_backend id =
+    Xs.make ()
+    >>= fun xsc ->
+    backend id
+    >>= fun path ->
+    Xs.(immediate xsc (fun h -> rm h path))
 end
