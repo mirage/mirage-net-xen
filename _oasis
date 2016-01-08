@@ -1,6 +1,6 @@
 OASISFormat: 0.4
 Name:        mirage-net-xen
-Version:     1.4.1
+Version:     1.5.0
 Synopsis:    Xen network frontend driver implementation
 Authors:     Anil Madhavapeddy, David Scott
 License:     ISC
