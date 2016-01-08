@@ -34,6 +34,8 @@
 
 * Require shared-memory-ring >= 1.1.1 (#25).
 
+* Require io-page >= 1.5.0 for `page_size` (#21).
+
 1.4.1 (2015-03-14):
 * Wait for the backend network device to enter the `Connected` state
   before transmitting packets.  This fixes a race condition in a
