@@ -1,3 +1,37 @@
+1.5.0 (2016-01-08):
+
+* Generate a unique ID for each Netfront request. Before, we used
+  the grant ref, but multiple requests may use the same ref. This could
+  lead to pages being returned to the free pool before they had been
+  read by netback.
+
+* Add netback support, allowing mirage-net-xen to provide virtual
+  network interfaces to other domains. This API is currently
+  experimental.
+
+* Add support for fragmented frames, including frames larger than one
+  page.
+
+* Use `Cstruct.fillv` instead of our own copy (which was incorrect, but
+  the buggy path didn't get called unless the frame was fragmented,
+  which we didn't support anyway).
+
+* Use the offset field (previously we assumed it was always zero).
+
+* `listen` now starts and returns the polling thread. Before, it
+  returned a dummy thread that never resolved. This means that errors in
+  the `listen` thread should now be reported.
+
+* Errors in the user function passed to `listen` are now handled by
+  `Lwt.async` (however that is configured). Before, we always printed
+  the exception and then continued.
+
+* Don't discard frames sent before `listen` is called.
+
+* Split `Shared_page_pool` out into its own module.
+
+* Fixed some compiler warnings.
+
 1.4.1 (2015-03-14):
 * Wait for the backend network device to enter the `Connected` state
   before transmitting packets.  This fixes a race condition in a
