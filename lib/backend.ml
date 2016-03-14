@@ -19,6 +19,9 @@
 open Lwt.Infix
 open Result
 
+let src = Logs.Src.create "net-xen:backend" ~doc:"Mirage's Xen netback"
+module Log = (val Logs.src_log src : Logs.LOG)
+
 let return = Lwt.return
 
 module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
@@ -122,7 +125,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       Ring.Rpc.Back.ack_requests (from_netfront ())
         (fun slot ->
           match TX.Request.read slot with
-          | Error msg -> Printf.printf "Netif.Backend.read_read TX has unparseable request: %s" msg
+          | Error msg -> Log.warn (fun f -> f "read_read TX has unparseable request: %s" msg)
           | Ok req ->
             q := req :: !q
         );

@@ -19,6 +19,9 @@ open Printf
 open OS
 open Result
 
+let src = Logs.Src.create "net-xen:frontend" ~doc:"Mirage's Xen netfront"
+module Log = (val Logs.src_log src : Logs.LOG)
+
 let return = Lwt.return
 
 let allocate_ring ~domid =
@@ -106,12 +109,12 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     (* Read details about the device *)
     C.read_backend id >>= fun backend_conf ->
     let backend_id = backend_conf.S.backend_id in
-    Printf.printf "Netfront.create: id=%d domid=%d\n%!" vif_id backend_id;
+    Log.info (fun f -> f "create: id=%d domid=%d" vif_id backend_id);
     let features = backend_conf.S.features_available in
-    Features.(Printf.printf " sg:%b gso_tcpv4:%b rx_copy:%b rx_flip:%b smart_poll:%b\n"
+    Log.info Features.(fun f -> f " sg:%b gso_tcpv4:%b rx_copy:%b rx_flip:%b smart_poll:%b"
       features.sg features.gso_tcpv4 features.rx_copy features.rx_flip features.smart_poll);
     C.read_mac id >>= fun mac ->
-    printf "MAC: %s\n%!" (Macaddr.to_string mac);
+    Log.info (fun f -> f "MAC: %s" (Macaddr.to_string mac));
     (* Allocate a transmit and receive ring, and event channel *)
     create_rx (vif_id, backend_id)
     >>= fun (rx_gnt, rx_fring, rx_client) ->
@@ -205,7 +208,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
             let _ : Io_page.t = pop_rx_page nf msg.RX.Response.id in
             ()
           );
-          printf "Netif: received error: %d" e
+          Log.err (fun f -> f "received error: %d" e)
       | Ok frame ->
           let data = Cstruct.create frame.Recv.total_size in
           let next = ref 0 in
@@ -252,7 +255,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
         if Hashtbl.mem devices id' then
           return (`Ok (Hashtbl.find devices id'))
         else begin
-          printf "Netif.connect %d\n%!" id';
+          Log.info (fun f -> f "connect %d" id');
           Lwt.catch
           (fun () ->
             plug_inner id'
@@ -269,7 +272,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       end
     | None ->
       C.enumerate () >>= fun all ->
-      printf "Netif.connect %s: could not find device\n" id;
+      Log.info (fun f -> f "connect %s: could not find device" id);
       return (`Error (`Unknown
                         (Printf.sprintf "device %s not found (available = [ %s ])"
                            id (String.concat ", " all))))
@@ -277,7 +280,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   (* Unplug shouldn't block, although the Xen one might need to due
      to Xenstore? XXX *)
   let disconnect t =
-    printf "Netif: disconnect\n%!";
+    Log.info (fun f -> f "disconnect");
     (* TODO: free pages still in [t.rx_map] *)
     Shared_page_pool.shutdown t.t.tx_pool;
     Hashtbl.remove devices t.t.vif_id;
@@ -403,6 +406,6 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   let reset_stats_counters t = Stats.reset t.t.stats
 
   let () =
-    printf "Netif: add resume hook\n%!";
+    Log.info (fun f -> f "add resume hook");
     Sched.add_resume_hook resume
 end
