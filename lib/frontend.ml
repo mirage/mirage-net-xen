@@ -231,18 +231,10 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     loop Activations.program_start
 
   let connect id =
-    (* If [id] is an integer, use it. Otherwise default to the first
-       available disk. *)
-    lwt id' =
-      let id = try Some (int_of_string id) with _ -> None in
-      match id with 
-      | Some id -> 
-        return (Some id)
-      | None -> 
-        C.enumerate ()
-        >>= function
-        | [] -> return None 
-        | hd::_ -> return (Some (int_of_string hd))
+    (* If [id] is an integer, use it. Otherwise, return an error message
+       which enumerates the available interfaces. *)
+    let id' =
+      try Some (int_of_string id) with _ -> None
     in
     match id' with
     | Some id' -> begin
