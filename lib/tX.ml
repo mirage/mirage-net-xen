@@ -32,13 +32,15 @@ module Request = struct
     size: int;
   }
 
-  cstruct req {
-    uint32_t       gref;
-    uint16_t       offset;
-    uint16_t       flags;
-    uint16_t       id;
-    uint16_t       size
-  } as little_endian
+  [%%cstruct
+  type req = {
+    gref: uint32_t;
+    offset: uint16_t;
+    flags: uint16_t;
+    id: uint16_t;
+    size: uint16_t;
+  } [@@little_endian]
+  ]
 
   let write t slot =
     let flags = Flags.to_int t.flags in
@@ -70,23 +72,25 @@ module Request = struct
 end
 
 module Response = struct
-  cenum status {
-    DROPPED = 0xfffe;
-    ERROR   = 0xffff;
-    OKAY    = 0;
-    NULL    = 1;
-  } as int16_t
-
+  [%%cenum
+  type status =
+    | DROPPED [@id 0xfffe]
+    | ERROR   [@id 0xffff]
+    | OKAY    [@id 0]
+    | NULL    [@id 1]
+    [@@int16_t]
+  ]
   type t = {
     id: int;
     status: status;
   }
 
-  cstruct resp {
-    uint16_t       id;
-    uint16_t       status
-  } as little_endian
-
+  [%%cstruct
+  type resp = {
+    id: uint16_t;
+    status: uint16_t;
+  } [@@little_endian]
+  ]
   let write t slot =
     set_resp_id slot t.id;
     set_resp_status slot (status_to_int t.status)

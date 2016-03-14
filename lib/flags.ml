@@ -16,7 +16,7 @@
  *)
 open Sexplib.Std
 
-type t = int with sexp
+type t = int [@@deriving sexp]
 
 let empty          = 0
 

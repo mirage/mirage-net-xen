@@ -21,7 +21,7 @@ type t = {
   sg: bool;
   gso_tcpv4: bool;
   smart_poll: bool;
-} with sexp
+} [@@deriving sexp]
 (** All the features of which news has reached harvard; there may be others
     but they haven't been discovered *)
 

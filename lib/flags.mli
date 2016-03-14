@@ -15,7 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-type t with sexp
+type t [@@deriving sexp]
 (** A set of flags. *)
 
 val empty : t

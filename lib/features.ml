@@ -22,7 +22,7 @@ type t = {
   sg: bool;
   gso_tcpv4: bool;
   smart_poll: bool;
-} with sexp
+} [@@deriving sexp]
 
 let supported = {
   rx_copy = true;
