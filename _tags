@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: 26e0601531e70af275d65034a3f4fb0c)
+# DO NOT EDIT (digest: d4aa5fdbcedc4980386bc13db678439b)
 # Ignore VCS directories, you can use the same kind of rule outside
 # OASIS_START/STOP if you want to exclude directories that contains
 # useless stuff for the build process
@@ -29,23 +29,27 @@ true: annot, bin_annot
 "lib/shared_page_pool.cmx": for-pack(Netchannel)
 "lib/assemble.cmx": for-pack(Netchannel)
 <lib/*.ml{,i,y}>: pkg_cstruct
-<lib/*.ml{,i,y}>: pkg_cstruct.syntax
+<lib/*.ml{,i,y}>: pkg_cstruct.ppx
 <lib/*.ml{,i,y}>: pkg_ipaddr
-<lib/*.ml{,i,y}>: pkg_lwt.syntax
 <lib/*.ml{,i,y}>: pkg_mirage-profile
 <lib/*.ml{,i,y}>: pkg_mirage-xen
+<lib/*.ml{,i,y}>: pkg_ppx_deriving
+<lib/*.ml{,i,y}>: pkg_ppx_sexp_conv
 <lib/*.ml{,i,y}>: pkg_result
+<lib/*.ml{,i,y}>: pkg_sexplib
 <lib/*.ml{,i,y}>: pkg_xen-evtchn
 <lib/*.ml{,i,y}>: pkg_xen-gnt
 # Library mirage-net-xen
 "compat/mirage-net-xen.cmxs": use_mirage-net-xen
 <compat/*.ml{,i,y}>: pkg_cstruct
-<compat/*.ml{,i,y}>: pkg_cstruct.syntax
+<compat/*.ml{,i,y}>: pkg_cstruct.ppx
 <compat/*.ml{,i,y}>: pkg_ipaddr
-<compat/*.ml{,i,y}>: pkg_lwt.syntax
 <compat/*.ml{,i,y}>: pkg_mirage-profile
 <compat/*.ml{,i,y}>: pkg_mirage-xen
+<compat/*.ml{,i,y}>: pkg_ppx_deriving
+<compat/*.ml{,i,y}>: pkg_ppx_sexp_conv
 <compat/*.ml{,i,y}>: pkg_result
+<compat/*.ml{,i,y}>: pkg_sexplib
 <compat/*.ml{,i,y}>: pkg_xen-evtchn
 <compat/*.ml{,i,y}>: pkg_xen-gnt
 <compat/*.ml{,i,y}>: use_netchannel
@@ -53,5 +57,5 @@ true: annot, bin_annot
 true: annot, bin_annot, debug, principal
 true: strict_sequence
 not (<lib/rX.*> or <lib/tX.*> or <lib/flag.*> or <lib/s.*>): warn(A)
-<lib/rX.*> or <lib/tX.*> or <lib/flags.*>: pkg_cstruct.syntax, pkg_sexplib.syntax, warn(A-4-32)
-<lib/s.*> or <lib/features.*>: pkg_sexplib.syntax, warn(A-4)
+<lib/rX.*> or <lib/tX.*> or <lib/flags.*>: warn(A-4-32)
+<lib/s.*> or <lib/features.*>: warn(A-4)

@@ -18,21 +18,21 @@ open Sexplib.Std
 type id = [
 | `Client of int (* device id *)
 | `Server of int * int (* domid * device id *)
-] with sexp
+] [@@deriving sexp]
 
 type backend_configuration = {
   frontend_id: int;
   backend_id: int;
   backend: string;
   features_available: Features.t;
-} with sexp
+} [@@deriving sexp]
 
 type frontend_configuration = {
   tx_ring_ref: int32;
   rx_ring_ref: int32;
   event_channel: string;
   feature_requests: Features.t;
-} with sexp
+} [@@deriving sexp]
 
 module type CONFIGURATION = sig
 

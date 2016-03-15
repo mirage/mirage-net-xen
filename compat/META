@@ -1,6 +1,6 @@
 # OASIS_START
-# DO NOT EDIT (digest: 1beb864ab25d65346386309c2fb8d8c4)
-version = "1.4.1"
+# DO NOT EDIT (digest: 592e63e106c8ae2e23bf3c47976d8c65)
+version = "1.5.0"
 description = "Xen network frontend driver implementation"
 requires = "netchannel"
 archive(byte) = "mirage-net-xen.cma"

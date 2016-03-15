@@ -21,13 +21,15 @@ module Request = struct
   type t = {
     id: int;
     gref: int32;
-  } with sexp
+  } [@@deriving sexp]
 
-  cstruct req {
-    uint16_t       id;
-    uint16_t       _padding;
-    uint32_t       gref
-  } as little_endian
+  [%%cstruct
+  type req = {
+    id: uint16_t;
+    _padding: uint16_t;
+    gref: uint32_t;
+  } [@@little_endian]
+  ]
 
   let write t slot =
     set_req_id slot t.id;
@@ -49,12 +51,14 @@ module Response = struct
     size: (int, error) result;
   }
 
-  cstruct resp {
-    uint16_t       id;
-    uint16_t       offset;
-    uint16_t       flags;
-    uint16_t       status;  (* Negative => Err, else Size *)
-  } as little_endian
+  [%%cstruct
+  type resp = {
+    id: uint16_t;
+    offset: uint16_t;
+    flags: uint16_t;
+    status: uint16_t;  (* Negative => Err, else Size *)
+  } [@@little_endian]
+  ]
 
   let within_page name x =
     if x < 0 || x > 4096

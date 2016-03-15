@@ -21,7 +21,7 @@ module Request : sig
   type t = {
     id: int;
     gref: int32;
-  } with sexp
+  } [@@deriving sexp]
 
   val write: t -> Cstruct.t -> unit
 

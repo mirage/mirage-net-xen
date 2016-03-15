@@ -39,3 +39,11 @@ configure:
 .PHONY: build doc test all install uninstall reinstall clean distclean configure
 
 # OASIS_STOP
+
+IMAGE?=mirage-net-xen
+
+xen-depends: Dockerfile build.sh
+	docker build -t $(IMAGE) .
+
+xen-build: xen-depends clean
+	docker run -v $(shell pwd):/src $(IMAGE) /build.sh

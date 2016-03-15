@@ -24,7 +24,8 @@ let return = Lwt.return
 let allocate_ring ~domid =
   let page = Io_page.get 1 in
   let x = Io_page.to_cstruct page in
-  lwt gnt = Gnt.Gntshr.get () in
+  Gnt.Gntshr.get ()
+  >>= fun gnt ->
   for i = 0 to Cstruct.len x - 1 do
     Cstruct.set_uint8 x i 0
   done;
@@ -32,7 +33,8 @@ let allocate_ring ~domid =
   return (gnt, x)
 
 let create_ring ~domid ~idx_size name =
-  lwt rx_gnt, buf = allocate_ring ~domid in
+  allocate_ring ~domid
+  >>= fun (rx_gnt, buf) ->
   let sring = Ring.Rpc.of_buf ~buf ~idx_size ~name in
   let fring = Ring.Rpc.Front.init ~sring in
   let client = Lwt_ring.Front.init string_of_int fring in
@@ -110,8 +112,10 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     C.read_mac id >>= fun mac ->
     printf "MAC: %s\n%!" (Macaddr.to_string mac);
     (* Allocate a transmit and receive ring, and event channel *)
-    lwt (rx_gnt, rx_fring, rx_client) = create_rx (vif_id, backend_id) in
-    lwt (tx_gnt, _tx_fring, tx_client) = create_tx (vif_id, backend_id) in
+    create_rx (vif_id, backend_id)
+    >>= fun (rx_gnt, rx_fring, rx_client) ->
+    create_tx (vif_id, backend_id)
+    >>= fun (tx_gnt, _tx_fring, tx_client) ->
     let tx_mutex = Lwt_mutex.create () in
     let evtchn = Eventchn.bind_unbound_port h backend_id in
     let evtchn_port = Eventchn.to_int evtchn in
@@ -154,7 +158,8 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   let refill_requests nf =
     let num = Ring.Rpc.Front.get_free_requests nf.rx_fring in
     if num > 0 then
-      lwt grefs = Gnt.Gntshr.get_n num in
+      Gnt.Gntshr.get_n num
+      >>= fun grefs ->
       let pages = Io_page.pages num in
       List.iter
         (fun (gref, page) ->
@@ -242,16 +247,18 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
           return (`Ok (Hashtbl.find devices id'))
         else begin
           printf "Netif.connect %d\n%!" id';
-          try_lwt
-            lwt t = plug_inner id' in
+          Lwt.catch
+          (fun () ->
+            plug_inner id'
+            >>= fun t ->
             let l = Lwt_mutex.create () in
             let c = Lwt_condition.create () in
             (* packets are dropped until listen is called *)
             let dev = { t; resume_fns=[]; l; c } in
             Hashtbl.add devices id' dev;
             return (`Ok dev)
-          with exn ->
-            return (`Error (`Unknown (Printexc.to_string exn)))
+          ) (fun exn ->
+            return (`Error (`Unknown (Printexc.to_string exn))))
         end
       end
     | None ->
@@ -287,8 +294,9 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
         flags;
         size
       } in
-      lwt replied = Lwt_ring.Front.write nf.t.tx_client
-          (fun slot -> TX.Request.write request slot; id) in
+      Lwt_ring.Front.write nf.t.tx_client
+          (fun slot -> TX.Request.write request slot; id)
+      >>= fun replied ->
       (* request has been written; when replied returns we have a reply *)
       let release = replied >>= fun reply ->
         let open TX.Response in
@@ -303,7 +311,8 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   (* Transmit a packet from buffer, with offset and length.
    * The buffer's data must fit in a single block. *)
   let write_already_locked nf datav =
-    lwt remaining, th = write_request ~flags:Flags.empty nf datav in
+    write_request ~flags:Flags.empty nf datav
+    >>= fun (remaining, th) ->
     assert (Cstruct.lenv remaining = 0);
     Lwt_ring.Front.push nf.t.tx_client (notify nf.t);
     return th
@@ -314,7 +323,8 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     let numneeded = Shared_page_pool.blocks_needed size in
     Lwt_mutex.with_lock nf.t.tx_mutex
       (fun () ->
-         lwt () = Lwt_ring.Front.wait_for_free nf.t.tx_client numneeded in
+         Lwt_ring.Front.wait_for_free nf.t.tx_client numneeded
+         >>= fun () ->
          match numneeded with
          | 0 -> return (return ())
          | 1 ->
@@ -324,28 +334,35 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
            (* For Xen Netfront, the first fragment contains the entire packet
             * length, which the backend will use to consume the remaining
             * fragments until the full length is satisfied *)
-           lwt datav, first_th =
-             write_request ~flags:Flags.more_data ~size nf datav in
+           write_request ~flags:Flags.more_data ~size nf datav
+           >>= fun (datav, first_th) ->
            let rec xmit datav = function
              | 0 -> return []
              | 1 ->
-                 lwt datav, th = write_request ~flags:Flags.empty nf datav in
+                 write_request ~flags:Flags.empty nf datav
+                 >>= fun (datav, th) ->
                  assert (Cstruct.lenv datav = 0);
                  return [ th ]
              | n ->
-                 lwt datav, next_th = write_request ~flags:Flags.more_data nf datav in
-                 lwt rest = xmit datav (n - 1) in
+                 write_request ~flags:Flags.more_data nf datav
+                 >>= fun (datav, next_th) ->
+                 xmit datav (n - 1)
+                 >>= fun rest ->
                  return (next_th :: rest) in
-           lwt rest_th = xmit datav (n - 1) in
+           xmit datav (n - 1)
+           >>= fun rest_th ->
            (* All fragments are now written, we can now notify the backend *)
            Lwt_ring.Front.push nf.t.tx_client (notify nf.t);
            return (Lwt.join (first_th :: rest_th))
       )
 
   let rec writev nf datav =
-    lwt released =
-      try_lwt writev_no_retry nf datav
-      with Lwt_ring.Shutdown -> return (Lwt.fail Lwt_ring.Shutdown) in
+    Lwt.catch
+      (fun () -> writev_no_retry nf datav)
+      (function
+       | Lwt_ring.Shutdown -> return (Lwt.fail Lwt_ring.Shutdown)
+       | e -> Lwt.fail e)
+    >>= fun released ->
     Lwt.on_failure released (function
       | Lwt_ring.Shutdown -> ignore (writev nf datav)
       | ex -> raise ex
@@ -355,12 +372,15 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   let write nf data = writev nf [data]
 
   let resume (id,t) =
-    lwt transport = plug_inner id in
+    plug_inner id
+    >>= fun transport ->
     let old_transport = t.t in
     t.t <- transport;
-    lwt () = Lwt_list.iter_s (fun fn -> fn t) t.resume_fns in
-    lwt () = Lwt_mutex.with_lock t.l
-        (fun () -> Lwt_condition.broadcast t.c (); return ()) in
+    Lwt_list.iter_s (fun fn -> fn t) t.resume_fns
+    >>= fun () ->
+    Lwt_mutex.with_lock t.l
+        (fun () -> Lwt_condition.broadcast t.c (); return ())
+    >>= fun () ->
     Lwt_ring.Front.shutdown old_transport.rx_client;
     Lwt_ring.Front.shutdown old_transport.tx_client;
     return ()
