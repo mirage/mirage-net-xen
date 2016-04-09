@@ -3,4 +3,4 @@
 # This is run inside the container to check the library builds
 
 cd /src
-opam pin add mirage-block-xen . -y
+opam pin add mirage-net-xen . -y

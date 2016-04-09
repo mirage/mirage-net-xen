@@ -1,3 +1,11 @@
+1.6.0 (2016-04-09):
+
+* Don't assume the first interface is meant when id can't be decoded
+
+* Remove camlp4 dependency, add OCaml 4.02.ppx dependency
+
+* Add simple xen-build Makefile target which tests via Docker
+
 1.5.0 (2016-01-08):
 
 * Generate a unique ID for each Netfront request. Before, we used
