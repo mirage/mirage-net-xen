@@ -136,8 +136,8 @@ module Shared_page_pool : sig
   val make : (Gnt.gntref -> Io_page.t -> unit) -> t
   val block_size : int
 
-  val use : t -> (Gnt.gntref -> Cstruct.t -> ('a * unit Lwt.t) Lwt.t) -> ('a * unit Lwt.t) Lwt.t
-  (** [use t fn] calls [fn gref block] with a free shared block of memory.
+  val use : t -> (id:Cstruct.uint16 -> Gnt.gntref -> Cstruct.t -> ('a * unit Lwt.t) Lwt.t) -> ('a * unit Lwt.t) Lwt.t
+  (** [use t fn] calls [fn ~id gref block] with a free shared block of memory.
    * The function should return a thread that indicates when the request has
    * been added to the queue, by returning a result value and a second thread
    * indicating when the block can be returned to the pool. *)
@@ -146,24 +146,33 @@ module Shared_page_pool : sig
 
   val shutdown : t -> unit
 end = struct
-  type block = Gnt.gntref * Cstruct.t
+  let max_pages = 256
+
+  type block = {
+    id : Cstruct.uint16;
+    gref : Gnt.gntref;
+    data : Cstruct.t;
+  }
   type t = {
     grant : Gnt.gntref -> Io_page.t -> unit;
+    mutable next_id : Cstruct.uint16;
     mutable blocks : block list;
     mutable in_use : int;
     mutable shutdown : bool;
+    avail : unit Lwt_condition.t; (* Fires when free list becomes non-empty *)
   }
 
   let page_size = Io_page.round_to_page_size 1
   let block_size = page_size / 2
 
-  let make grant = { grant; blocks = []; shutdown = false; in_use = 0 }
+  let make grant = { next_id = 0; grant; blocks = []; shutdown = false; in_use = 0; avail = Lwt_condition.create () }
 
   let shutdown t =
     t.shutdown <- true;
+    Lwt_condition.broadcast t.avail (); (* Wake anyone who's still waiting for free pages *)
     if t.in_use = 0 then (
-      t.blocks |> List.iter (fun (gref, block) ->
-        if block.Cstruct.off = 0 then (
+      t.blocks |> List.iter (fun {id=_; gref; data} ->
+        if data.Cstruct.off = 0 then (
           Gnt.Gntshr.end_access gref;
           Gnt.Gntshr.put gref;
         )
@@ -180,33 +189,44 @@ end = struct
     return (gnt, Io_page.to_cstruct page)
 
   let put t block =
+    let was_empty = (t.blocks = []) in
     t.blocks <- block :: t.blocks;
     t.in_use <- t.in_use - 1;
+    if was_empty then Lwt_condition.broadcast t.avail ();
     if t.in_use = 0 && t.shutdown then shutdown t
 
-  let use t fn =
+  let use_block t fn block =
+    let {id; gref; data} = block in
+    t.in_use <- t.in_use + 1;
+    Lwt.try_bind
+      (fun () -> fn ~id gref data)
+      (fun (_, release as result) ->
+         Lwt.on_termination release (fun () -> put t block);
+         return result
+      )
+      (fun ex -> put t block; Lwt.fail ex)
+
+  let rec use t fn =
     if t.shutdown then
       failwith "Shared_page_pool.use after shutdown";
-    lwt (gntref, block) as grant =
-      match t.blocks with
-      | [] ->
-          (* Frames normally fit within 2048 bytes, so we split each page in half. *)
-          lwt gntref, page = alloc t in
-          let b1 = Cstruct.sub page 0 block_size in
-          let b2 = Cstruct.shift page block_size in
-          t.blocks <- (gntref, b2) :: t.blocks;
-          return (gntref, b1)
-      | hd :: tl ->
-          t.blocks <- tl;
-          return hd in
-    t.in_use <- t.in_use + 1;
-    lwt (_, release) as result =
-      try_lwt fn gntref block
-      with ex ->
-        put t grant;
-        raise ex in
-    Lwt.on_termination release (fun () -> put t grant);
-    return result
+    match t.blocks with
+    | [] when t.next_id >= max_pages ->
+      MProf.Trace.label "Shared_page_pool waiting for free";
+      Lwt_condition.wait t.avail >>= fun () -> use t fn
+    | [] ->
+      (* Frames normally fit within 2048 bytes, so we split each page in half. *)
+      alloc t >>= fun (gref, page) ->
+      let b1 = Cstruct.sub page 0 block_size in
+      let b2 = Cstruct.shift page block_size in
+      let id1 = t.next_id in
+      let id2 = t.next_id + 1 in
+      t.next_id <- t.next_id + 2;
+      t.blocks <- {id = id2; gref; data = b2} :: t.blocks;
+      Lwt_condition.broadcast t.avail ();
+      use_block t fn {id = id1; gref; data = b1}
+    | hd :: tl ->
+      t.blocks <- tl;
+      use_block t fn hd
 
   let blocks_needed bytes =
     (bytes + block_size - 1) / block_size
@@ -480,14 +500,14 @@ let blitv src dst =
  * remaining (unsent) data and a thread which will return when the data has
  * been ack'd by netback. *)
 let write_request ?size ~flags nf datav =
-  Shared_page_pool.use nf.t.tx_pool (fun gref shared_block ->
+  Shared_page_pool.use nf.t.tx_pool (fun ~id gref shared_block ->
     let len, datav = blitv datav shared_block in
     (* [size] includes extra pages to follow later *)
     let size = match size with |None -> len |Some s -> s in
     nf.t.stats.tx_pkts <- Int32.succ nf.t.stats.tx_pkts;
     nf.t.stats.tx_bytes <- Int64.add nf.t.stats.tx_bytes (Int64.of_int size);
     lwt replied = Lwt_ring.Front.write nf.t.tx_client
-        (TX.Proto_64.write ~id:gref ~gref:(Int32.of_int gref) ~offset:shared_block.Cstruct.off ~flags ~size) in
+        (TX.Proto_64.write ~id ~gref:(Int32.of_int gref) ~offset:shared_block.Cstruct.off ~flags ~size) in
     (* request has been written; when replied returns we have a reply *)
     let release = replied >>= fun _ -> return () in
     return (datav, release)
