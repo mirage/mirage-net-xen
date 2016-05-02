@@ -1,3 +1,10 @@
+1.4.2 (2016-05-02):
+* Generate a unique ID for each Netfront request. Before, we used
+  the grant ref, but multiple requests may use the same ref. This could
+  lead to pages being returned to the free pool before they had been
+  read by netback.
+* Generate a unique ID for each page shared with Xen for received data
+
 1.4.1 (2015-03-14):
 * Wait for the backend network device to enter the `Connected` state
   before transmitting packets.  This fixes a race condition in a
