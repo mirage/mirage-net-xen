@@ -82,6 +82,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     rx_client: (RX.Response.t,int) Lwt_ring.Front.t;
     rx_map: (int, Gnt.gntref * Io_page.t) Hashtbl.t;
     rx_gnt: Gnt.gntref;
+    mutable rx_id: Cstruct.uint16;
 
     evtchn: Eventchn.t;
     features: Features.t;
@@ -145,7 +146,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     (* Register callback activation *)
     let backend = backend_conf.S.backend in
     return { vif_id; backend_id; tx_client; tx_gnt; tx_mutex; tx_pool;
-             rx_gnt; rx_fring; rx_client; rx_map; stats;
+             rx_gnt; rx_fring; rx_client; rx_map; rx_id = 0 ; stats;
              evtchn; mac; backend; features; 
            }
 
@@ -163,7 +164,12 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       let pages = Io_page.pages num in
       List.iter
         (fun (gref, page) ->
-           let id = gref mod (1 lsl 16) in
+           let rec next () =
+             let id = nf.rx_id in
+             nf.rx_id <- (succ nf.rx_id) mod (1 lsl 16) ;
+             if Hashtbl.mem nf.rx_map id then next () else id
+           in
+           let id = next () in
            Gnt.Gntshr.grant_access ~domid:nf.backend_id ~writable:true gref page;
            Hashtbl.add nf.rx_map id (gref, page);
            let slot_id = Ring.Rpc.Front.next_req_id nf.rx_fring in
