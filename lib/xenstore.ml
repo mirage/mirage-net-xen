@@ -15,6 +15,9 @@
  *)
 open Lwt
 
+let src = Logs.Src.create "net-xen:xenstore" ~doc:"mirage-net-xen's XenStore client"
+module Log = (val Logs.src_log src : Logs.LOG)
+
 let (/) a b =
   if a = "" then b
   else if b = "" then a
@@ -72,8 +75,8 @@ module Make(Xs: Xs_client_lwt.S) = struct
     | Some x -> return x
     | None ->
       let m = Macaddr.make_local (fun _ -> Random.int 255) in
-      Printf.printf "Netfront %s: no configured MAC, using %s"
-        (Sexplib.Sexp.to_string (S.sexp_of_id id)) (Macaddr.to_string m);
+      Log.info (fun f -> f "%s: no configured MAC, using %s"
+        (Sexplib.Sexp.to_string (S.sexp_of_id id)) (Macaddr.to_string m));
       return m
 
   let read_features side path =
@@ -272,7 +275,7 @@ module Make(Xs: Xs_client_lwt.S) = struct
       (function
         | Xs_protocol.Enoent _ -> return []
         | e ->
-          Printf.printf "Netchannel.Xenstore.enumerate caught exception: %s\n" (Printexc.to_string e);
+          Log.warn (fun f -> f "enumerate caught exception: %s" (Printexc.to_string e));
           return []
       )
 
