@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: d4aa5fdbcedc4980386bc13db678439b)
+# DO NOT EDIT (digest: 8bc23f9150092d87cae18795653899ac)
 # Ignore VCS directories, you can use the same kind of rule outside
 # OASIS_START/STOP if you want to exclude directories that contains
 # useless stuff for the build process
@@ -22,7 +22,6 @@ true: annot, bin_annot
 "lib/s.cmx": for-pack(Netchannel)
 "lib/stats.cmx": for-pack(Netchannel)
 "lib/flags.cmx": for-pack(Netchannel)
-"lib/resultM.cmx": for-pack(Netchannel)
 "lib/rX.cmx": for-pack(Netchannel)
 "lib/tX.cmx": for-pack(Netchannel)
 "lib/features.cmx": for-pack(Netchannel)
@@ -36,6 +35,7 @@ true: annot, bin_annot
 <lib/*.ml{,i,y}>: pkg_ppx_deriving
 <lib/*.ml{,i,y}>: pkg_ppx_sexp_conv
 <lib/*.ml{,i,y}>: pkg_result
+<lib/*.ml{,i,y}>: pkg_rresult
 <lib/*.ml{,i,y}>: pkg_sexplib
 <lib/*.ml{,i,y}>: pkg_xen-evtchn
 <lib/*.ml{,i,y}>: pkg_xen-gnt
@@ -49,6 +49,7 @@ true: annot, bin_annot
 <compat/*.ml{,i,y}>: pkg_ppx_deriving
 <compat/*.ml{,i,y}>: pkg_ppx_sexp_conv
 <compat/*.ml{,i,y}>: pkg_result
+<compat/*.ml{,i,y}>: pkg_rresult
 <compat/*.ml{,i,y}>: pkg_sexplib
 <compat/*.ml{,i,y}>: pkg_xen-evtchn
 <compat/*.ml{,i,y}>: pkg_xen-gnt
@@ -59,3 +60,4 @@ true: strict_sequence
 not (<lib/rX.*> or <lib/tX.*> or <lib/flag.*> or <lib/s.*>): warn(A)
 <lib/rX.*> or <lib/tX.*> or <lib/flags.*>: warn(A-4-32)
 <lib/s.*> or <lib/features.*>: warn(A-4)
+#true: warn_error(+1..47)

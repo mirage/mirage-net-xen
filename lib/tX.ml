@@ -24,12 +24,10 @@ module Request = struct
     offset: int;
     flags: Flags.t;
     id: int;
-
-    (** For frames split over multiple requests, first.size is the total
+    size: int; (** For frames split over multiple requests, first.size is the total
         size of the frame. Each of the following requests gives the size
         of that fragment. The receiver recovers the actual size of the
         first fragment by subtracting all of the other sizes. *)
-    size: int;
   }
 
   [%%cstruct
@@ -56,15 +54,15 @@ module Request = struct
     else Ok x
 
   let read slot =
-    let open ResultM in
+    let open Rresult in
     let gref = get_req_gref slot in
     let offset = get_req_offset slot in
     within_page "TX.Request.offset" offset
-    >>= fun offset ->
+    >>| fun offset ->
     let flags = Flags.of_int (get_req_flags slot) in
     let id = get_req_id slot in
     let size = get_req_size slot in
-    return { gref; offset; flags; id; size }
+    { gref; offset; flags; id; size }
 
   let flags t = t.flags
 

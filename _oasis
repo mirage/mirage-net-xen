@@ -1,6 +1,6 @@
 OASISFormat: 0.4
 Name:        mirage-net-xen
-Version:     1.6.1
+Version:     1.6.2
 Synopsis:    Xen network frontend driver implementation
 Authors:     Anil Madhavapeddy, David Scott
 License:     ISC
@@ -19,6 +19,6 @@ Library "netchannel"
   CompiledObject:     best
   Path:               lib
   Modules:            Frontend, Backend, Xenstore, S, Stats
-  InternalModules:    Flags, ResultM, RX, TX, Features, Shared_page_pool, Assemble
-  BuildDepends:       cstruct, cstruct.ppx, ppx_deriving, ppx_sexp_conv, ipaddr, mirage-xen, xen-evtchn, xen-gnt, mirage-profile, result, sexplib
+  InternalModules:    Flags, RX, TX, Features, Shared_page_pool, Assemble
+  BuildDepends:       cstruct, cstruct.ppx, ppx_deriving, ppx_sexp_conv, ipaddr, mirage-xen, xen-evtchn, xen-gnt, mirage-profile, result, rresult, sexplib
   XMETARequires:      lwt, cstruct, ipaddr, mirage-xen, xen-evtchn, xen-gnt, mirage-profile, result

@@ -1,6 +1,12 @@
+1.6.2 (2016-05-02):
+* Increase initial size of rx map hashtable for better cold start behaviour.
+* Switch to using `rresult` for Result handling.
+* Add tests for OCaml 4.03.0
+
 1.6.1 (2016-05-02):
 
-* Generate a unique ID for each page shared with Xen for receiving data
+* Generate a unique ID for each page shared with Xen for
+  receiving data (#41 via @hannesm)
 
 1.6.0 (2016-04-09):
 
