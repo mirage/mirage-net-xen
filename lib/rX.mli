@@ -15,8 +15,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-open Result
-
 module Request : sig
   type t = {
     id: int;
@@ -35,16 +33,16 @@ module Response : sig
     id: int;
     offset: int;
     flags: Flags.t;
-    size: (int, error) result;
+    size: (int, error) Result.result;
   }
 
-  val read: Cstruct.t -> t ResultM.t
+  val read: Cstruct.t -> (t, string) Result.result
 
   val write: t -> Cstruct.t -> unit
 
   val flags: t -> Flags.t
 
-  val size: t -> (int, error) result
+  val size: t -> (int, error) Result.result
 end
 
 val total_size: int

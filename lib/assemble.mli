@@ -16,13 +16,11 @@
 
 (** Assemble complete network frames from Xen network messages. *)
 
-open Result
-
 module type FRAME_MSG = sig
   type error
   type t
   val flags : t -> Flags.t
-  val size : t -> (int, error) result
+  val size : t -> (int, error) Result.result
 end
 
 module Make(F : FRAME_MSG) : sig

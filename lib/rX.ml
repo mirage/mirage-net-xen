@@ -14,7 +14,6 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
-open Result
 open Sexplib.Std
 
 module Request = struct
@@ -66,17 +65,17 @@ module Response = struct
     else Ok x
 
   let read slot =
-    let open ResultM in
+    let open Rresult in
     let id = get_resp_id slot in
     let offset = get_resp_offset slot in
     within_page "RX.Response.offset" offset
-    >>= fun offset ->
+    >>| fun offset ->
     let flags = Flags.of_int (get_resp_flags slot) in
     let size =
       match get_resp_status slot with
       | status when status > 0 -> Ok status
       | status -> Error status in
-    return { id; offset; flags; size }
+    { id; offset; flags; size }
 
   let write t slot =
     set_resp_id slot t.id;

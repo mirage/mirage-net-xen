@@ -137,7 +137,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     C.write_frontend_configuration id front_conf >>= fun () ->
     C.connect id >>= fun () ->
     (* Wait for backend to accept connection *)
-    let rx_map = Hashtbl.create 1 in
+    let rx_map = Hashtbl.create 51 in
     C.wait_until_backend_connected backend_conf >>= fun () ->
     Eventchn.unmask h evtchn;
     let stats = Stats.create () in
