@@ -34,6 +34,12 @@ type frontend_configuration = {
   feature_requests: Features.t;
 } [@@deriving sexp]
 
+(* Should probably move this to Cstruct. *)
+let pp_frame fmt x =
+  let b = Buffer.create (Cstruct.len x * 3) in
+  Cstruct.hexdump_to_buffer b x;
+  Format.pp_print_string fmt (Buffer.contents b)
+
 module type CONFIGURATION = sig
 
   type 'a io

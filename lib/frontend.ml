@@ -222,7 +222,12 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
           assert (!next = Cstruct.len data);
           Lwt.async (fun () ->
             Stats.rx nf.stats (Int64.of_int (Cstruct.len data));
-            fn data
+            Lwt.catch (fun () -> fn data)
+              (fun ex ->
+                 Log.err (fun f -> f "uncaught exception from listen callback while handling frame:@\n%a@\nException: @[%s@]"
+                             S.pp_frame data (Printexc.to_string ex));
+                 Lwt.return ()
+              )
           )
     )
 

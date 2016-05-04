@@ -159,7 +159,14 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
             ) >|= fun () ->
             assert (!next = Cstruct.len data);
             Stats.rx t.stats (Int64.of_int (Cstruct.len data));
-            Lwt.async (fun () -> fn data)
+            Lwt.async (fun () ->
+              Lwt.catch (fun () -> fn data)
+                (fun ex ->
+                   Log.err (fun f -> f "uncaught exception from listen callback while handling frame:@\n%a@\nException: @[%s@]"
+                               S.pp_frame data (Printexc.to_string ex));
+                   Lwt.return ()
+                )
+              )
       )
       >>= fun () ->
       let notify = Ring.Rpc.Back.push_responses_and_check_notify (from_netfront ()) in
