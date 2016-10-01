@@ -18,5 +18,5 @@
 module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) : sig
   include V1_LWT.NETWORK
 
-  val connect : string -> [`Ok of t | `Error of error] io
+  val connect : string -> t io
 end
