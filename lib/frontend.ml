@@ -258,29 +258,25 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     match id' with
     | Some id' -> begin
         if Hashtbl.mem devices id' then
-          return (`Ok (Hashtbl.find devices id'))
+          return (Hashtbl.find devices id')
         else begin
           Log.info (fun f -> f "connect %d" id');
-          Lwt.catch
-          (fun () ->
-            plug_inner id'
-            >>= fun t ->
-            let l = Lwt_mutex.create () in
-            let c = Lwt_condition.create () in
-            (* packets are dropped until listen is called *)
-            let dev = { t; resume_fns=[]; l; c } in
-            Hashtbl.add devices id' dev;
-            return (`Ok dev)
-          ) (fun exn ->
-            return (`Error (`Unknown (Printexc.to_string exn))))
+          plug_inner id' >>= fun t ->
+          let l = Lwt_mutex.create () in
+          let c = Lwt_condition.create () in
+          (* packets are dropped until listen is called *)
+          let dev = { t; resume_fns=[]; l; c } in
+          Hashtbl.add devices id' dev;
+          return dev
         end
       end
     | None ->
       C.enumerate () >>= fun all ->
-      Log.info (fun f -> f "connect %s: could not find device" id);
-      return (`Error (`Unknown
-                        (Printf.sprintf "device %s not found (available = [ %s ])"
-                           id (String.concat ", " all))))
+      let msg =
+        Printf.sprintf "device %s not found (available = [ %s ])"
+          id (String.concat ", " all)
+      in
+      Lwt.fail_with msg
 
   (* Unplug shouldn't block, although the Xen one might need to due
      to Xenstore? XXX *)
