@@ -28,7 +28,6 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   exception Netback_shutdown
 
   type +'a io = 'a Lwt.t
-  type id = unit  (* Remove once mirage-types removes it *)
   type macaddr = Macaddr.t
   type buffer = Cstruct.t
   type page_aligned_buffer = Io_page.t
