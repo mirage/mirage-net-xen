@@ -99,8 +99,6 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     c : unit Lwt_condition.t;
   }
 
-  type id = string
-
   let h = Eventchn.init ()
 
   (* Given a VIF ID, construct a netfront record for it *)
