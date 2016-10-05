@@ -5,5 +5,5 @@ env:
   global:
   - EXTRA_REMOTES="https://github.com/mirage/mirage-dev.git"
   matrix:
-  - OCAML_VERSION=latest PACKAGE=mirage-net-xen
-  - OCAML_VERSION=4.02   PACKAGE=mirage-net-xen
+  - OCAML_VERSION=4.03 PACKAGE=mirage-net-xen
+  - OCAML_VERSION=4.02 PACKAGE=mirage-net-xen
