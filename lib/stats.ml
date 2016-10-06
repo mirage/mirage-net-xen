@@ -15,12 +15,9 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-type t = {
-  mutable rx_bytes: int64;
-  mutable rx_pkts: int32;
-  mutable tx_bytes: int64;
-  mutable tx_pkts: int32;
-}
+open V1.Network
+
+(* XXX: should move to mirage-types (V1.Stats) *)
 
 let create () = { rx_pkts=0l; rx_bytes=0L; tx_pkts=0l; tx_bytes=0L }
 

@@ -18,6 +18,7 @@
 
 open Lwt.Infix
 open Result
+open V1.Network
 
 let src = Logs.Src.create "net-xen:backend" ~doc:"Mirage's Xen netback"
 module Log = (val Logs.src_log src : Logs.LOG)
@@ -31,18 +32,6 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   type macaddr = Macaddr.t
   type buffer = Cstruct.t
   type page_aligned_buffer = Io_page.t
-  type error = [
-    | `Unknown of string
-    | `Unimplemented
-    | `Disconnected
-  ]
-
-  type stats = Stats.t = {
-    mutable rx_bytes : int64;
-    mutable rx_pkts : int32;
-    mutable tx_bytes : int64;
-    mutable tx_pkts : int32; 
-  }
 
   type t = {
     channel: Eventchn.t;
@@ -52,7 +41,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     mutable to_netfront: (RX.Response.t,int) Ring.Rpc.Back.t option;
     rx_reqs: RX.Request.t Lwt_sequence.t;         (* Grants we can write into *)
     mutable from_netfront: (TX.Response.t,int) Ring.Rpc.Back.t option;
-    stats: Stats.t;
+    stats: stats;
     write_mutex: Lwt_mutex.t;
     get_free_mutex: Lwt_mutex.t;
   }
@@ -113,7 +102,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
 
   (* Loop checking for incoming requests on the from_netfront ring.
      Frames received will go to [fn]. *)
-  let listen (t: t) fn : unit Lwt.t =
+  let listen (t: t) fn : (unit, error) result Lwt.t =
     let from_netfront () =
       match t.from_netfront with
       | None -> raise Netback_shutdown
@@ -172,7 +161,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       if notify then Eventchn.notify h t.channel;
       OS.Activations.after t.channel after
       >>= loop in
-    loop OS.Activations.program_start
+    loop OS.Activations.program_start >|= fun () -> Ok ()
 
   let to_netfront t =
     match t.to_netfront with
@@ -233,9 +222,9 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       fill_reqs ~src:buf ~is_first:true reqs;
       Stats.tx t.stats (Int64.of_int total_size);
       return ()
-    ) >|= fun () ->
-    if Ring.Rpc.Back.push_responses_and_check_notify (to_netfront t)
-    then Eventchn.notify h t.channel
+    ) >|= fun () -> Ok (
+      if Ring.Rpc.Back.push_responses_and_check_notify (to_netfront t)
+      then Eventchn.notify h t.channel)
 
   let write t buf = writev t [buf]
 

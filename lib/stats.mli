@@ -15,22 +15,16 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-type t = {
-  mutable rx_bytes: int64;  (** total payload bytes received *)
-  mutable rx_pkts: int32;   (** total packets received *)
-  mutable tx_bytes: int64;  (** total payload bytes transmitted *)
-  mutable tx_pkts: int32;   (** total packets transmitted *)
-}
-(** Per-connection statistics *)
+open V1.Network
 
-val create: unit -> t
+val create: unit -> stats
 (** [create ()] returns a fresh set of zeroed counters *)
 
-val rx: t -> int64 -> unit
+val rx: stats -> int64 -> unit
 (** [rx t size] records that we received a packet of length [size] *)
 
-val tx: t -> int64 -> unit
+val tx: stats -> int64 -> unit
 (** [tx t size] records that we transmitted a packet of length [size] *)
 
-val reset: t -> unit
+val reset: stats -> unit
 (** [reset t] resets all packet counters in [t] to 0 *)

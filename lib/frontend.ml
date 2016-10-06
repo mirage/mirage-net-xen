@@ -18,6 +18,7 @@ open Lwt.Infix
 open Printf
 open OS
 open Result
+open V1.Network
 
 let src = Logs.Src.create "net-xen:frontend" ~doc:"Mirage's Xen netfront"
 module Log = (val Logs.src_log src : Logs.LOG)
@@ -51,20 +52,6 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   type page_aligned_buffer = Io_page.t
   type buffer = Cstruct.t
   type macaddr = Macaddr.t
-
-  (** IO operation errors *)
-  type error = [
-    | `Unknown of string (** an undiagnosed error *)
-    | `Unimplemented     (** operation not yet implemented in the code *)
-    | `Disconnected      (** the device has been previously disconnected *)
-  ]
-
-  type stats = Stats.t = {
-    mutable rx_bytes : int64;
-    mutable rx_pkts : int32;
-    mutable tx_bytes : int64;
-    mutable tx_pkts : int32;
-  }
 
   type transport = {
     vif_id: int;
@@ -375,7 +362,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       | Lwt_ring.Shutdown -> ignore (writev nf datav)
       | ex -> raise ex
     );
-    return ()
+    return (Ok ())
 
   let write nf data = writev nf [data]
 
