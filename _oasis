@@ -12,5 +12,5 @@ Library "mirage-net-xen"
   Path:               lib
   Findlibname:        mirage-net-xen
   Modules:            Netif
-  BuildDepends:       lwt.syntax, cstruct, cstruct.syntax, ipaddr, mirage-xen, xen-evtchn, xen-gnt, mirage-profile
+  BuildDepends:       cstruct, cstruct.ppx, ipaddr, mirage-xen, xen-evtchn, xen-gnt, mirage-profile
   XMETARequires:      lwt, cstruct, ipaddr, mirage-xen, xen-evtchn, xen-gnt, mirage-profile

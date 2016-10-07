@@ -14,7 +14,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-open Lwt
+open Lwt.Infix
 open Printf
 open OS
 
@@ -33,33 +33,37 @@ type error = [
 let allocate_ring ~domid =
   let page = Io_page.get 1 in
   let x = Io_page.to_cstruct page in
-  lwt gnt = Gnt.Gntshr.get () in
+  Gnt.Gntshr.get () >>= fun gnt ->
   for i = 0 to Cstruct.len x - 1 do
     Cstruct.set_uint8 x i 0
   done;
   Gnt.Gntshr.grant_access ~domid ~writable:true gnt page;
-  return (gnt, x)
+  Lwt.return (gnt, x)
 
 module RX = struct
 
   module Proto_64 = struct
-    cstruct req {
-      uint16_t       id;
-      uint16_t       _padding;
-      uint32_t       gref
-    } as little_endian
+    [%%cstruct
+      type req = {
+        id: uint16_t;
+        _padding: uint16_t;
+        gref: uint32_t;
+      } [@@little_endian]
+    ]
 
     let write ~id ~gref slot =
       set_req_id slot id;
       set_req_gref slot gref;
       id
 
-        cstruct resp {
-        uint16_t       id;
-        uint16_t       offset;
-        uint16_t       flags;
-        uint16_t       status
-      } as little_endian
+    [%%cstruct
+      type resp = {
+        id: uint16_t;
+        offset: uint16_t;
+        flags: uint16_t;
+        status: uint16_t;  (* Negative => Err, else Size *)
+      } [@@little_endian]
+    ]
 
     let read slot =
       get_resp_id slot,
@@ -73,11 +77,11 @@ module RX = struct
 
   let create (id, domid) =
     let name = sprintf "Netif.RX.%d" id in
-    lwt rx_gnt, buf = allocate_ring ~domid in
+    allocate_ring ~domid >>= fun (rx_gnt, buf) ->
     let sring = Ring.Rpc.of_buf ~buf ~idx_size:Proto_64.total_size ~name in
     let fring = Ring.Rpc.Front.init ~sring in
     let client = Lwt_ring.Front.init string_of_int fring in
-    return (rx_gnt, fring, client)
+    Lwt.return (rx_gnt, fring, client)
 
 end
 
@@ -86,13 +90,15 @@ module TX = struct
   type response = int
 
   module Proto_64 = struct
-    cstruct req {
-      uint32_t       gref;
-      uint16_t       offset;
-      uint16_t       flags;
-      uint16_t       id;
-      uint16_t       size
-    } as little_endian
+    [%%cstruct
+      type req = {
+        gref: uint32_t;
+        offset: uint16_t;
+        flags: uint16_t;
+        id: uint16_t;
+        size: uint16_t;
+      } [@@little_endian]
+    ]
 
     type flags =
       |Checksum_blank (* 1 *)
@@ -110,10 +116,12 @@ module TX = struct
       set_req_size slot size;
       id
 
-        cstruct resp {
-        uint16_t       id;
-        uint16_t       status
-      } as little_endian
+    [%%cstruct
+      type resp = {
+        id: uint16_t;
+        status: uint16_t;
+      } [@@little_endian]
+    ]
 
     let read slot =
       get_resp_id slot, get_resp_status slot
@@ -124,11 +132,11 @@ module TX = struct
 
   let create (id, domid) =
     let name = sprintf "Netif.TX.%d" id in
-    lwt rx_gnt, buf = allocate_ring ~domid in
+    allocate_ring ~domid >>= fun (rx_gnt, buf) ->
     let sring = Ring.Rpc.of_buf ~buf ~idx_size:Proto_64.total_size ~name in
     let fring = Ring.Rpc.Front.init ~sring in
     let client = Lwt_ring.Front.init string_of_int fring in
-    return (rx_gnt, fring, client)
+    Lwt.return (rx_gnt, fring, client)
 end
 
 module Shared_page_pool : sig
@@ -184,9 +192,9 @@ end = struct
   let alloc t =
     let page = Io_page.get 1 in
     (* (the Xen version of caml_alloc_pages clears the page, so we don't have to) *)
-    lwt gnt = Gnt.Gntshr.get () in
+    Gnt.Gntshr.get () >>= fun gnt ->
     t.grant gnt page;
-    return (gnt, Io_page.to_cstruct page)
+    Lwt.return (gnt, Io_page.to_cstruct page)
 
   let put t block =
     let was_empty = (t.blocks = []) in
@@ -202,7 +210,7 @@ end = struct
       (fun () -> fn ~id gref data)
       (fun (_, release as result) ->
          Lwt.on_termination release (fun () -> put t block);
-         return result
+         Lwt.return result
       )
       (fun ex -> put t block; Lwt.fail ex)
 
@@ -285,76 +293,69 @@ let h = Eventchn.init ()
 
 (* Given a VIF ID and backend domid, construct a netfront record for it *)
 let plug_inner id =
-  lwt xsc = Xs.make () in
-  lwt backend_id =
-    Xs.(immediate xsc 
-          (fun h -> 
-             read h (sprintf "device/vif/%d/backend-id" id)))
-    >|= int_of_string in
+  Xs.make () >>= fun xsc ->
+  Xs.(immediate xsc (fun h -> read h (sprintf "device/vif/%d/backend-id" id)))
+  >>= fun backend_id ->
+  let backend_id = int_of_string backend_id in
   Printf.printf "Netfront.create: id=%d domid=%d\n%!" id backend_id;
   (* Allocate a transmit and receive ring, and event channel for them *)
-  lwt (rx_gnt, rx_fring, rx_client) = RX.create (id, backend_id) in
-  lwt (tx_gnt, _tx_fring, tx_client) = TX.create (id, backend_id) in
+  RX.create (id, backend_id) >>= fun (rx_gnt, rx_fring, rx_client) ->
+  TX.create (id, backend_id) >>= fun (tx_gnt, _tx_fring, tx_client) ->
   let tx_mutex = Lwt_mutex.create () in
   let evtchn = Eventchn.bind_unbound_port h backend_id in
   let evtchn_port = Eventchn.to_int evtchn in
   (* Read Xenstore info and set state to Connected *)
   let node = sprintf "device/vif/%d/" id in
-  lwt backend = Xs.(immediate xsc (fun h -> read h (node ^ "backend"))) in
-  lwt mac =
-    Xs.(immediate xsc (fun h -> read h (node ^ "mac"))) 
-    >|= Macaddr.of_string
-    >>= function
-    | None -> Lwt.fail (Failure "invalid mac")
-    | Some m -> return m 
-  in
+  Xs.(immediate xsc (fun h -> read h (node ^ "backend"))) >>= fun backend ->
+  Xs.(immediate xsc (fun h -> read h (node ^ "mac"))) >|= Macaddr.of_string
+  >>= (function
+      | None -> Lwt.fail (Failure "invalid mac")
+      | Some m -> Lwt.return m) >>= fun mac ->
   printf "MAC: %s\n%!" (Macaddr.to_string mac);
   Xs.(transaction xsc (fun h ->
       let wrfn k v = write h (node ^ k) v in
-      wrfn "tx-ring-ref" (string_of_int tx_gnt) >>
-      wrfn "rx-ring-ref" (string_of_int rx_gnt) >>
-      wrfn "event-channel" (string_of_int (evtchn_port)) >>
-      wrfn "request-rx-copy" "1" >>
-      wrfn "feature-rx-notify" "1" >>
-      wrfn "feature-sg" "1" >>
+      wrfn "tx-ring-ref" (string_of_int tx_gnt) >>= fun () ->
+      wrfn "rx-ring-ref" (string_of_int rx_gnt) >>= fun () ->
+      wrfn "event-channel" (string_of_int (evtchn_port)) >>= fun () ->
+      wrfn "request-rx-copy" "1" >>= fun () ->
+      wrfn "feature-rx-notify" "1" >>= fun () ->
+      wrfn "feature-sg" "1" >>= fun () ->
       wrfn "state" Device_state.(to_string Connected)
-    )) >>
+    )) >>= fun () ->
   (* Read backend features *)
-  lwt features = Xs.(transaction xsc (fun h ->
+  Xs.(transaction xsc (fun h ->
       let rdfn k =
-        try_lwt
-          read h (sprintf "%s/feature-%s" backend k) >>= 
-          function
-          |"1" -> return true
-          |_ -> return false
-        with exn -> return false in
-      lwt sg = rdfn "sg" in
-      lwt gso_tcpv4 = rdfn "gso-tcpv4" in
-      lwt rx_copy = rdfn "rx-copy" in
-      lwt rx_flip = rdfn "rx-flip" in
-      lwt smart_poll = rdfn "smart-poll" in
-      return { sg; gso_tcpv4; rx_copy; rx_flip; smart_poll }
-    )) in
+        Lwt.catch (fun () ->
+            read h (sprintf "%s/feature-%s" backend k) >|=
+            function "1" -> true |_ -> false)
+          (fun _ -> Lwt.return false)
+      in
+      rdfn "sg" >>= fun sg ->
+      rdfn "gso-tcpv4" >>= fun gso_tcpv4 ->
+      rdfn "rx-copy" >>= fun rx_copy ->
+      rdfn "rx-flip" >>= fun rx_flip ->
+      rdfn "smart-poll" >>= fun smart_poll ->
+      Lwt.return { sg; gso_tcpv4; rx_copy; rx_flip; smart_poll }
+    )) >>= fun features ->
   let rx_map = Hashtbl.create 1 in
   Printf.printf " sg:%b gso_tcpv4:%b rx_copy:%b rx_flip:%b smart_poll:%b\n"
     features.sg features.gso_tcpv4 features.rx_copy features.rx_flip features.smart_poll;
-  lwt () = Xs.(wait xsc (fun h ->
-    try_lwt
-      lwt state = read h (backend ^ "/state") in
+  Xs.(wait xsc (fun h ->
+    Lwt.catch (fun () ->
+      read h (backend ^ "/state") >>= fun state ->
       if state = Device_state.(to_string Connected)
-      then return ()
-      else raise Xs_protocol.Eagain
-    with Xs_protocol.Enoent _ -> raise Xs_protocol.Eagain
-  )) in
+      then Lwt.return ()
+      else Lwt.fail Xs_protocol.Eagain)
+      (function Xs_protocol.Enoent _ -> Lwt.fail Xs_protocol.Eagain | ex -> Lwt.fail ex))) >>= fun () ->
   Eventchn.unmask h evtchn;
   let stats = { rx_pkts=0l;rx_bytes=0L;tx_pkts=0l;tx_bytes=0L } in
   let grant_tx_page = Gnt.Gntshr.grant_access ~domid:backend_id ~writable:false in
   let tx_pool = Shared_page_pool.make grant_tx_page in
   (* Register callback activation *)
-  return { id; backend_id; tx_client; tx_gnt; tx_mutex; tx_pool;
-           rx_gnt; rx_fring; rx_client; rx_map; rx_id = 0; stats;
-           evtchn; mac; backend; features; 
-         }
+  Lwt.return { id; backend_id; tx_client; tx_gnt; tx_mutex; tx_pool;
+               rx_gnt; rx_fring; rx_client; rx_map; rx_id = 0; stats;
+               evtchn; mac; backend; features; 
+             }
 
 (** Set of active block devices *)
 let devices : (int, t) Hashtbl.t = Hashtbl.create 1
@@ -363,15 +364,13 @@ let devices_waiters : (int, t Lwt.u Lwt_sequence.t) Hashtbl.t = Hashtbl.create 1
 
 (** Return a list of valid VIFs *)
 let enumerate () =
-  lwt xs = Xs.make () in
-  try_lwt
-    Xs.(immediate xs (fun h -> directory h "device/vif"))
-  with
-  | Xs_protocol.Enoent _ ->
-    return []
-  | e ->
-    printf "Netif.enumerate caught exception: %s\n" (Printexc.to_string e);
-    return []
+  Xs.make () >>= fun xs ->
+  Lwt.catch (fun () -> Xs.(immediate xs (fun h -> directory h "device/vif")))
+    (function
+      | Xs_protocol.Enoent _ -> Lwt.return []
+      | e ->
+        printf "Netif.enumerate caught exception: %s\n" (Printexc.to_string e);
+        Lwt.return [])
 
 let notify nf () =
   Eventchn.notify h nf.evtchn
@@ -379,7 +378,7 @@ let notify nf () =
 let refill_requests nf =
   let num = Ring.Rpc.Front.get_free_requests nf.rx_fring in
   if num > 0 then
-    lwt grefs = Gnt.Gntshr.get_n num in
+    Gnt.Gntshr.get_n num >>= fun grefs ->
     let pages = Io_page.pages num in
     List.iter
       (fun (gref, page) ->
@@ -397,8 +396,8 @@ let refill_requests nf =
       ) (List.combine grefs pages);
     if Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring
     then notify nf ();
-    return ()
-  else return ()
+    Lwt.return ()
+  else Lwt.return ()
 
 let rx_poll nf (fn: Cstruct.t -> unit Lwt.t) =
   MProf.Trace.label "Netif.rx_poll";
@@ -413,9 +412,9 @@ let rx_poll nf (fn: Cstruct.t -> unit Lwt.t) =
         let packet = Cstruct.sub (Io_page.to_cstruct page) 0 sz in
         nf.stats.rx_pkts <- Int32.succ nf.stats.rx_pkts;
         nf.stats.rx_bytes <- Int64.add nf.stats.rx_bytes (Int64.of_int sz);
-        ignore_result 
-          (try_lwt fn packet
-           with exn -> return (printf "RX exn %s\n%!" (Printexc.to_string exn)))
+        Lwt.ignore_result
+          (Lwt.catch (fun () -> fn packet)
+             (fun exn -> Lwt.return (printf "RX exn %s\n%!" (Printexc.to_string exn))))
       |err -> printf "RX error %d\n%!" err
     )
 
@@ -436,43 +435,36 @@ let poll_thread (nf: t) : unit Lwt.t =
 let connect id =
   (* If [id] is an integer, use it. Otherwise default to the first
      available disk. *)
-  lwt id' =
-    let id = try Some (int_of_string id) with _ -> None in
-    match id with 
-    | Some id -> 
-      return (Some id)
-    | None -> 
-      enumerate ()
-      >>= function
-      | [] -> return None 
-      | hd::_ -> return (Some (int_of_string hd))
-  in
+  (match try Some (int_of_string id) with _ -> None with
+   | Some id -> Lwt.return (Some id)
+   | None -> enumerate () >>= function
+     | [] -> Lwt.return None
+     | hd::_ -> Lwt.return (Some (int_of_string hd))) >>= fun id' ->
   match id' with
   | Some id' -> begin
       if Hashtbl.mem devices id' then
-        return (`Ok (Hashtbl.find devices id'))
+        Lwt.return (`Ok (Hashtbl.find devices id'))
       else begin
         printf "Netif.connect %d\n%!" id';
-        try_lwt
-          lwt t = plug_inner id' in
+        Lwt.catch (fun () ->
+          plug_inner id' >>= fun t ->
           let l = Lwt_mutex.create () in
           let c = Lwt_condition.create () in
           (* packets are dropped until listen is called *)
-          let receive_callback = fun _ -> return () in
+          let receive_callback = fun _ -> Lwt.return () in
           let dev = { t; resume_fns=[]; receive_callback; l; c } in
           let (_: unit Lwt.t) = poll_thread dev in
           Hashtbl.add devices id' dev;
-          return (`Ok dev)
-        with exn ->
-          return (`Error (`Unknown (Printexc.to_string exn)))
+          Lwt.return (`Ok dev))
+          (fun exn -> Lwt.return (`Error (`Unknown (Printexc.to_string exn))))
       end
     end
   | None ->
-    lwt all = enumerate () in
+    enumerate () >>= fun all ->
     printf "Netif.connect %s: could not find device\n" id;
-    return (`Error (`Unknown
-                      (Printf.sprintf "device %s not found (available = [ %s ])"
-                         id (String.concat ", " all))))
+    Lwt.return (`Error (`Unknown
+                          (Printf.sprintf "device %s not found (available = [ %s ])"
+                             id (String.concat ", " all))))
 
 (* Unplug shouldn't block, although the Xen one might need to due
    to Xenstore? XXX *)
@@ -480,7 +472,7 @@ let disconnect t =
   printf "Netif: disconnect\n%!";
   Shared_page_pool.shutdown t.t.tx_pool;
   Hashtbl.remove devices t.t.id;
-  return ()
+  Lwt.return ()
 
 (** Copy from src to dst until src is exhausted or dst is full.
  * Returns the number of bytes copied and the remaining data from src, if any. *)
@@ -512,20 +504,21 @@ let write_request ?size ~flags nf datav =
     let size = match size with |None -> len |Some s -> s in
     nf.t.stats.tx_pkts <- Int32.succ nf.t.stats.tx_pkts;
     nf.t.stats.tx_bytes <- Int64.add nf.t.stats.tx_bytes (Int64.of_int size);
-    lwt replied = Lwt_ring.Front.write nf.t.tx_client
-        (TX.Proto_64.write ~id ~gref:(Int32.of_int gref) ~offset:shared_block.Cstruct.off ~flags ~size) in
+    Lwt_ring.Front.write nf.t.tx_client
+      (TX.Proto_64.write ~id ~gref:(Int32.of_int gref) ~offset:shared_block.Cstruct.off ~flags ~size)
+    >>= fun replied ->
     (* request has been written; when replied returns we have a reply *)
-    let release = replied >>= fun _ -> return () in
-    return (datav, release)
+    let release = replied >>= fun _ -> Lwt.return () in
+    Lwt.return (datav, release)
   )
 
 (* Transmit a packet from buffer, with offset and length.
  * The buffer's data must fit in a single block. *)
 let write_already_locked nf datav =
-  lwt remaining, th = write_request ~flags:0 nf datav in
+  write_request ~flags:0 nf datav >>= fun (remaining, th) ->
   assert (Cstruct.lenv remaining = 0);
   Lwt_ring.Front.push nf.t.tx_client (notify nf.t);
-  return th
+  Lwt.return th
 
 (* Transmit a packet from a list of pages *)
 let writev_no_retry nf datav =
@@ -533,9 +526,9 @@ let writev_no_retry nf datav =
   let numneeded = Shared_page_pool.blocks_needed size in
   Lwt_mutex.with_lock nf.t.tx_mutex
     (fun () ->
-       lwt () = Lwt_ring.Front.wait_for_free nf.t.tx_client numneeded in
+       Lwt_ring.Front.wait_for_free nf.t.tx_client numneeded >>= fun () ->
        match numneeded with
-       | 0 -> return (return ())
+       | 0 -> Lwt.return (Lwt.return ())
        | 1 ->
          (* If there is only one block, then just write it normally *)
          write_already_locked nf datav
@@ -543,43 +536,46 @@ let writev_no_retry nf datav =
          (* For Xen Netfront, the first fragment contains the entire packet
           * length, which the backend will use to consume the remaining
           * fragments until the full length is satisfied *)
-         lwt datav, first_th =
-           write_request ~flags:TX.Proto_64.flag_more_data ~size nf datav in
+         write_request ~flags:TX.Proto_64.flag_more_data ~size nf datav >>= fun (datav, first_th) ->
          let rec xmit datav = function
-           | 0 -> return []
+           | 0 -> Lwt.return []
            | 1 ->
-               lwt datav, th = write_request ~flags:0 nf datav in
+               write_request ~flags:0 nf datav >>= fun (datav, th) ->
                assert (Cstruct.lenv datav = 0);
-               return [ th ]
+               Lwt.return [ th ]
            | n ->
-               lwt datav, next_th = write_request ~flags:TX.Proto_64.flag_more_data nf datav in
-               lwt rest = xmit datav (n - 1) in
-               return (next_th :: rest) in
-         lwt rest_th = xmit datav (n - 1) in
+               write_request ~flags:TX.Proto_64.flag_more_data nf datav >>= fun (datav, next_th) ->
+               xmit datav (n - 1) >>= fun rest ->
+               Lwt.return (next_th :: rest) in
+         xmit datav (n - 1) >>= fun rest_th ->
          (* All fragments are now written, we can now notify the backend *)
          Lwt_ring.Front.push nf.t.tx_client (notify nf.t);
-         return (Lwt.join (first_th :: rest_th))
+         Lwt.return (Lwt.join (first_th :: rest_th))
     )
 
 let rec writev nf datav =
-  lwt released =
-    try_lwt writev_no_retry nf datav
-    with Lwt_ring.Shutdown -> return (fail Lwt_ring.Shutdown) in
+  Lwt.catch (fun () -> writev_no_retry nf datav)
+    (function Lwt_ring.Shutdown -> Lwt.return (Lwt.fail Lwt_ring.Shutdown)) >>= fun released ->
   Lwt.on_failure released (function
     | Lwt_ring.Shutdown -> ignore (writev nf datav)
     | ex -> raise ex
   );
-  return ()
+  Lwt.return ()
 
 let write nf data = writev nf [data]
 
 let wait_for_plug nf =
   Printf.printf "Wait for plug...\n";
   Lwt_mutex.with_lock nf.l (fun () ->
-      while_lwt not (Eventchn.is_valid nf.t.evtchn) do
-        MProf.Trace.label "Netif.wait_for_plug";
-        Lwt_condition.wait ~mutex:nf.l nf.c
-      done)
+      let rec loop () =
+        if not (Eventchn.is_valid nf.t.evtchn) then
+          (MProf.Trace.label "Netif.wait_for_plug";
+           Lwt_condition.wait ~mutex:nf.l nf.c >>= fun () ->
+           loop ())
+        else
+          Lwt.return ()
+      in
+      loop ())
 
 let listen nf fn =
   (* packets received from this point on will go to [fn]. Historical
@@ -592,23 +588,22 @@ let listen nf fn =
 let enumerate () =
   Xs.make ()
   >>= fun xsc ->
-  catch
-    (fun () -> 
-       Xs.(immediate xsc 
-             (fun h -> directory h "device/vif")) 
+  Lwt.catch
+    (fun () ->
+       Xs.(immediate xsc (fun h -> directory h "device/vif"))
        >|= (List.map int_of_string) )
-    (fun _ -> return [])
+    (fun _ -> Lwt.return [])
 
 let resume (id,t) =
-  lwt transport = plug_inner id in
+  plug_inner id >>= fun transport ->
   let old_transport = t.t in
   t.t <- transport;
-  lwt () = Lwt_list.iter_s (fun fn -> fn t) t.resume_fns in
-  lwt () = Lwt_mutex.with_lock t.l
-      (fun () -> Lwt_condition.broadcast t.c (); return ()) in
+  Lwt_list.iter_s (fun fn -> fn t) t.resume_fns >>= fun () ->
+  Lwt_mutex.with_lock t.l
+    (fun () -> Lwt_condition.broadcast t.c (); Lwt.return ()) >>= fun () ->
   Lwt_ring.Front.shutdown old_transport.rx_client;
   Lwt_ring.Front.shutdown old_transport.tx_client;
-  return ()
+  Lwt.return ()
 
 let resume () =
   let devs = Hashtbl.fold (fun k v acc -> (k,v)::acc) devices [] in
