@@ -1,5 +1,5 @@
 # OASIS_START
-# DO NOT EDIT (digest: 0f5ca7659b12bf5960e17a86f968a835)
+# DO NOT EDIT (digest: 4571b15d12835b155b0090b4cee201cb)
 # Ignore VCS directories, you can use the same kind of rule outside
 # OASIS_START/STOP if you want to exclude directories that contains
 # useless stuff for the build process
@@ -17,9 +17,8 @@ true: annot, bin_annot
 # Library mirage-net-xen
 "lib/mirage-net-xen.cmxs": use_mirage-net-xen
 <lib/*.ml{,i,y}>: pkg_cstruct
-<lib/*.ml{,i,y}>: pkg_cstruct.syntax
+<lib/*.ml{,i,y}>: pkg_cstruct.ppx
 <lib/*.ml{,i,y}>: pkg_ipaddr
-<lib/*.ml{,i,y}>: pkg_lwt.syntax
 <lib/*.ml{,i,y}>: pkg_mirage-profile
 <lib/*.ml{,i,y}>: pkg_mirage-xen
 <lib/*.ml{,i,y}>: pkg_xen-evtchn
