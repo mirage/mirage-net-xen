@@ -52,6 +52,8 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   type page_aligned_buffer = Io_page.t
   type buffer = Cstruct.t
   type macaddr = Macaddr.t
+  type error = V1.Network.error
+  let pp_error = Mirage_pp.pp_network_error
 
   type transport = {
     vif_id: int;
