@@ -234,6 +234,6 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   let reset_stats_counters t = Stats.reset t.stats
 
   let mac t = t.mac
-  
+
   let disconnect _t = failwith "TODO: disconnect"
 end
