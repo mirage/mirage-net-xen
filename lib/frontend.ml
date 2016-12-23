@@ -52,6 +52,8 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   type page_aligned_buffer = Io_page.t
   type buffer = Cstruct.t
   type macaddr = Macaddr.t
+  type error = V1.Network.error
+  let pp_error = Mirage_pp.pp_network_error
 
   type transport = {
     vif_id: int;
@@ -135,7 +137,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     let backend = backend_conf.S.backend in
     return { vif_id; backend_id; tx_client; tx_gnt; tx_mutex; tx_pool;
              rx_gnt; rx_fring; rx_client; rx_map; rx_id = 0 ; stats;
-             evtchn; mac; backend; features; 
+             evtchn; mac; backend; features;
            }
 
   (** Set of active block devices *)

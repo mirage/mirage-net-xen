@@ -20,5 +20,10 @@ Library "netchannel"
   Path:               lib
   Modules:            Frontend, Backend, Xenstore, S, Stats
   InternalModules:    Flags, ResultM, RX, TX, Features, Shared_page_pool, Assemble
-  BuildDepends:       cstruct, cstruct.ppx, ppx_deriving, ppx_sexp_conv, ipaddr, mirage-xen, xen-evtchn, xen-gnt, mirage-profile, result, sexplib, logs, mirage-types, mirage-types-lwt
-  XMETARequires:      lwt, cstruct, ipaddr, mirage-xen, xen-evtchn, xen-gnt, mirage-profile, result, mirage-types, mirage-types-lwt
+  BuildDepends:       cstruct, cstruct.ppx, ppx_deriving, ppx_sexp_conv, ipaddr,
+                      mirage-xen, xen-evtchn, xen-gnt, mirage-profile, result,
+                      sexplib, logs, mirage-types, mirage-types-lwt,
+                      mirage-runtime
+  XMETARequires:      lwt, cstruct, ipaddr, mirage-xen, xen-evtchn, xen-gnt,
+                      mirage-profile, result, mirage-types, mirage-types-lwt,
+                      mirage-runtime
