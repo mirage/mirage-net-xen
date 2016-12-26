@@ -18,7 +18,7 @@ open Lwt.Infix
 open Printf
 open OS
 open Result
-open V1.Network
+open Mirage_net
 
 let src = Logs.Src.create "net-xen:frontend" ~doc:"Mirage's Xen netfront"
 module Log = (val Logs.src_log src : Logs.LOG)
@@ -44,16 +44,18 @@ let create_ring ~domid ~idx_size name =
   let client = Lwt_ring.Front.init string_of_int fring in
   return (rx_gnt, fring, client)
 
-let create_rx (id, domid) = create_ring ~domid ~idx_size:RX.total_size (sprintf "Netif.RX.%d" id)
-let create_tx (id, domid) = create_ring ~domid ~idx_size:TX.total_size (sprintf "Netif.TX.%d" id)
+let create_rx (id, domid) =
+  create_ring ~domid ~idx_size:RX.total_size (sprintf "Netif.RX.%d" id)
+let create_tx (id, domid) =
+  create_ring ~domid ~idx_size:TX.total_size (sprintf "Netif.TX.%d" id)
 
 module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   type 'a io = 'a Lwt.t
   type page_aligned_buffer = Io_page.t
   type buffer = Cstruct.t
   type macaddr = Macaddr.t
-  type error = V1.Network.error
-  let pp_error = Mirage_pp.pp_network_error
+  type error = Mirage_net.error
+  let pp_error = Mirage_net.pp_error
 
   type transport = {
     vif_id: int;

@@ -22,8 +22,6 @@ Library "netchannel"
   InternalModules:    Flags, ResultM, RX, TX, Features, Shared_page_pool, Assemble
   BuildDepends:       cstruct, cstruct.ppx, ppx_deriving, ppx_sexp_conv, ipaddr,
                       mirage-xen, xen-evtchn, xen-gnt, mirage-profile, result,
-                      sexplib, logs, mirage-types, mirage-types-lwt,
-                      mirage-runtime
+                      sexplib, logs, mirage-net-lwt
   XMETARequires:      lwt, cstruct, ipaddr, mirage-xen, xen-evtchn, xen-gnt,
-                      mirage-profile, result, mirage-types, mirage-types-lwt,
-                      mirage-runtime
+                      mirage-profile, result, mirage-net-lwt

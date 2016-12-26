@@ -16,7 +16,6 @@
 
 (** Xen Netfront interface for Ethernet I/O. *)
 module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) : sig
-  include V1_LWT.NETWORK
-
-  val connect : string -> t io
+  include Mirage_net_lwt.S
+  val connect : string -> t Lwt.t
 end
