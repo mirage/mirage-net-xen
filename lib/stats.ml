@@ -15,9 +15,9 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-open V1.Network
+open Mirage_net
 
-(* XXX: should move to mirage-types (V1.Stats) *)
+(* XXX: should move to mirage-net (V1.Stats) *)
 
 let create () = { rx_pkts=0l; rx_bytes=0L; tx_pkts=0l; tx_bytes=0L }
 

@@ -18,7 +18,7 @@
 
 open Lwt.Infix
 open Result
-open V1.Network
+open Mirage_net
 
 let src = Logs.Src.create "net-xen:backend" ~doc:"Mirage's Xen netback"
 module Log = (val Logs.src_log src : Logs.LOG)
@@ -32,8 +32,8 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   type macaddr = Macaddr.t
   type buffer = Cstruct.t
   type page_aligned_buffer = Io_page.t
-  type error = V1.Network.error
-  let pp_error = Mirage_pp.pp_network_error
+  type error = Mirage_net.error
+  let pp_error = Mirage_net.pp_error
 
   type t = {
     channel: Eventchn.t;

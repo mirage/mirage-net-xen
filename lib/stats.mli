@@ -15,7 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-open V1.Network
+open Mirage_net
 
 val create: unit -> stats
 (** [create ()] returns a fresh set of zeroed counters *)
