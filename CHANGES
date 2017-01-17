@@ -1,3 +1,15 @@
+1.7.0 (unreleased):
+
+* Build against MirageOS version 3, and drop support for previous versions.
+
+* Log exceptions from the `listen` callback.
+
+* Use Cstruct.hexdump_pp to dump frames on error.
+
+* Use the Logs library for logging.
+
+* Use a monotonic counter for the RX id.
+
 1.6.1 (2016-05-02):
 
 * Generate a unique ID for each page shared with Xen for receiving data
