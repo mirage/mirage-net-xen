@@ -17,7 +17,7 @@
 
 open Mirage_net
 
-(* XXX: should move to mirage-net (V1.Stats) *)
+(* XXX: should move to mirage-net (Mirage_types.Stats) *)
 
 let create () = { rx_pkts=0l; rx_bytes=0L; tx_pkts=0l; tx_bytes=0L }
 
