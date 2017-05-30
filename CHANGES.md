@@ -1,4 +1,4 @@
-## 1.7.0 (unreleased):
+## 1.7.0 (2017-01-24):
 
 * Build against MirageOS version 3, and drop support for previous versions.
 * Log exceptions from the `listen` callback.
