@@ -4,5 +4,5 @@ script: bash -ex .travis-opam.sh
 env:
   global:
   matrix:
+  - OCAML_VERSION=4.04 PACKAGE=mirage-net-xen
   - OCAML_VERSION=4.03 PACKAGE=mirage-net-xen
-  - OCAML_VERSION=4.02 PACKAGE=mirage-net-xen

@@ -1,10 +1,4 @@
 _build/
-setup.bin
-setup.data
-setup.log
-configure
-config.mk
-configure.cmi
-configure.cmx
-configure.o
 .*.swp
+*.merlin
+*.install

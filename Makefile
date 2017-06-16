@@ -1,49 +1,23 @@
-# OASIS_START
-# DO NOT EDIT (digest: a3c674b4239234cbbe53afe090018954)
 
-SETUP = ocaml setup.ml
+.PHONY: build clean test
 
-build: setup.data
-	$(SETUP) -build $(BUILDFLAGS)
+build:
+	jbuilder build @install --dev
 
-doc: setup.data build
-	$(SETUP) -doc $(DOCFLAGS)
+test:
+	jbuilder runtest --dev
 
-test: setup.data build
-	$(SETUP) -test $(TESTFLAGS)
+install:
+	jbuilder install
 
-all:
-	$(SETUP) -all $(ALLFLAGS)
-
-install: setup.data
-	$(SETUP) -install $(INSTALLFLAGS)
-
-uninstall: setup.data
-	$(SETUP) -uninstall $(UNINSTALLFLAGS)
-
-reinstall: setup.data
-	$(SETUP) -reinstall $(REINSTALLFLAGS)
-
-clean:
-	$(SETUP) -clean $(CLEANFLAGS)
-
-distclean:
-	$(SETUP) -distclean $(DISTCLEANFLAGS)
-
-setup.data:
-	$(SETUP) -configure $(CONFIGUREFLAGS)
-
-configure:
-	$(SETUP) -configure $(CONFIGUREFLAGS)
-
-.PHONY: build doc test all install uninstall reinstall clean distclean configure
-
-# OASIS_STOP
-
-IMAGE?=mirage-net-xen
+uninstall:
+	jbuilder uninstall
 
 xen-depends: Dockerfile build.sh
-	docker build -t $(IMAGE) .
+	docker build -t mirage-net-xen .
 
 xen-build: xen-depends clean
-	docker run -v $(shell pwd):/src $(IMAGE) /build.sh
+	docker run -v $(shell pwd):/src mirage-net-xen /build.sh
+
+clean:
+	rm -rf _build
