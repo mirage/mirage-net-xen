@@ -1,8 +1,12 @@
 language: c
-install: wget https://raw.githubusercontent.com/ocaml/ocaml-travisci-skeleton/master/.travis-opam.sh
-script: bash -ex .travis-opam.sh
+sudo: false
+services:
+  - docker
+install: wget https://raw.githubusercontent.com/ocaml/ocaml-travisci-skeleton/master/.travis-docker.sh
+script: bash -ex ./.travis-docker.sh
 env:
   global:
+  - PACKAGE="mirage-net-xen"
   matrix:
-  - OCAML_VERSION=4.04 PACKAGE=mirage-net-xen
-  - OCAML_VERSION=4.03 PACKAGE=mirage-net-xen
+  - DISTRO="ubuntu-16.04" OCAML_VERSION="4.03.0"
+  - DISTRO="alpine-3.5" OCAML_VERSION="4.04.0"
