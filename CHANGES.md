@@ -1,3 +1,9 @@
+## 1.7.1 (2016-06-16):
+* Switch to jbuilder
+* Add topkg
+* Split into mirage-net-xen and netchannel
+* Add dependency on io-page-xen
+
 ## 1.7.0 (2017-01-24):
 
 * Build against MirageOS version 3, and drop support for previous versions.
