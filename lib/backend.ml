@@ -66,7 +66,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       let mapping = Gnt.Gnttab.map_exn gnttab tx_gnt true in
       Lwt_switch.add_hook (Some switch) (fun () -> Gnt.Gnttab.unmap_exn gnttab mapping; return ());
       let buf = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-      let sring = Ring.Rpc.of_buf ~buf ~idx_size:TX.total_size
+      let sring = Ring.Rpc.of_buf_no_init ~buf ~idx_size:TX.total_size
         ~name:("Netif.Backend.TX." ^ backend_configuration.S.backend) in
       Ring.Rpc.Back.init ~sring in
     let to_netfront =
@@ -74,7 +74,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       let mapping = Gnt.Gnttab.map_exn gnttab rx_gnt true in
       Lwt_switch.add_hook (Some switch) (fun () -> Gnt.Gnttab.unmap_exn gnttab mapping; return ());
       let buf = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-      let sring = Ring.Rpc.of_buf ~buf ~idx_size:RX.total_size
+      let sring = Ring.Rpc.of_buf_no_init ~buf ~idx_size:RX.total_size
         ~name:("Netif.Backend.RX." ^ backend_configuration.S.backend) in
       Ring.Rpc.Back.init ~sring in
     let stats = Stats.create () in
