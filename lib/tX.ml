@@ -16,6 +16,8 @@
  *)
 open Result
 
+[@@@ocaml.warning "-32"]  (* cstruct ppx generates unused values *)
+
 module Request = struct
   type error = { impossible : 'a. 'a }
 
