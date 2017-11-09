@@ -197,7 +197,12 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       if notify then Eventchn.notify h t.channel;
       OS.Activations.after t.channel after
       >>= loop in
-    loop OS.Activations.program_start >|= fun () -> Ok ()
+    Lwt.catch
+      (fun () -> loop OS.Activations.program_start >|= fun `Never_returns -> assert false)
+      (function
+        | Netback_shutdown -> Lwt.return (Ok ())
+        | ex -> Lwt.fail ex
+      )
 
   let to_netfront t =
     match t.to_netfront with
@@ -206,7 +211,8 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
 
   (* We need [n] pages to send a packet to the frontend. The Ring.Back API
      gives us all the requests that are available at once. Since we may need
-     fewer of this, stash them in the t.rx_reqs sequence. *)
+     fewer of this, stash them in the t.rx_reqs sequence.
+     Raises [Netback_shutdown] if the interface has been shut down. *)
   let get_n_grefs t n =
     let rec take seq = function
     | 0 -> []
@@ -232,35 +238,42 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     )
 
   let writev t buf =
-    let total_size = Cstruct.lenv buf in
-    let pages_needed = max 1 @@ Io_page.round_to_page_size total_size / Io_page.page_size in
-    (* Collect enough free pages from the client. *)
-    get_n_grefs t pages_needed
-    >>= fun reqs ->
-    Lwt_mutex.with_lock t.write_mutex (fun () ->
-      let rec fill_reqs ~src ~is_first = function
-        | r :: rs ->
-            let gnt = {Gnt.Gnttab.domid = t.frontend_id; ref = Int32.to_int r.RX.Request.gref} in
-            let mapping = Gnt.Gnttab.map_exn gnttab gnt true in
-            let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-            let len, src = Cstruct.fillv ~src ~dst in
-            Gnt.Gnttab.unmap_exn gnttab mapping;
-            let slot =
-              let ring = to_netfront t in
-              Ring.Rpc.Back.(slot ring (next_res_id ring)) in
-            let size = Ok (if is_first then total_size else len) in
-            let flags = if rs = [] then Flags.empty else Flags.more_data in
-            let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
-            RX.Response.write resp slot;
-            fill_reqs ~src ~is_first:false rs
-        | [] when Cstruct.lenv src = 0 -> ()
-        | [] -> failwith "BUG: not enough pages for data!" in
-      fill_reqs ~src:buf ~is_first:true reqs;
-      Stats.tx t.stats (Int64.of_int total_size);
-      return ()
-    ) >|= fun () -> Ok (
-      if Ring.Rpc.Back.push_responses_and_check_notify (to_netfront t)
-      then Eventchn.notify h t.channel)
+    Lwt.catch
+      (fun () ->
+         let total_size = Cstruct.lenv buf in
+         let pages_needed = max 1 @@ Io_page.round_to_page_size total_size / Io_page.page_size in
+         (* Collect enough free pages from the client. *)
+         get_n_grefs t pages_needed
+         >>= fun reqs ->
+         Lwt_mutex.with_lock t.write_mutex (fun () ->
+             let rec fill_reqs ~src ~is_first = function
+               | r :: rs ->
+                 let gnt = {Gnt.Gnttab.domid = t.frontend_id; ref = Int32.to_int r.RX.Request.gref} in
+                 let mapping = Gnt.Gnttab.map_exn gnttab gnt true in
+                 let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+                 let len, src = Cstruct.fillv ~src ~dst in
+                 Gnt.Gnttab.unmap_exn gnttab mapping;
+                 let slot =
+                   let ring = to_netfront t in
+                   Ring.Rpc.Back.(slot ring (next_res_id ring)) in
+                 let size = Ok (if is_first then total_size else len) in
+                 let flags = if rs = [] then Flags.empty else Flags.more_data in
+                 let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
+                 RX.Response.write resp slot;
+                 fill_reqs ~src ~is_first:false rs
+               | [] when Cstruct.lenv src = 0 -> ()
+               | [] -> failwith "BUG: not enough pages for data!" in
+             fill_reqs ~src:buf ~is_first:true reqs;
+             Stats.tx t.stats (Int64.of_int total_size);
+             return ()
+           ) >|= fun () -> Ok (
+           if Ring.Rpc.Back.push_responses_and_check_notify (to_netfront t)
+           then Eventchn.notify h t.channel)
+      )
+      (function
+        | Netback_shutdown -> Lwt.return (Error `Disconnected)
+        | ex -> Lwt.fail ex
+      )
 
   let write t buf = writev t [buf]
 
