@@ -285,10 +285,18 @@ module Make(Xs: Xs_client_lwt.S) = struct
     Xs.make ()
     >>= fun xsc ->
     Xs.wait xsc (fun h ->
-      Xs.read h (path / "state")
-      >>= fun state ->
-      if OS.Device_state.of_string state = OS.Device_state.Closing then return ()
-      else Lwt.fail Xs_protocol.Eagain
+        Lwt.try_bind
+          (fun () ->
+             Xs.read h (path / "state")
+          )
+          (fun state ->
+             if OS.Device_state.of_string state = OS.Device_state.Closing then return ()
+             else Lwt.fail Xs_protocol.Eagain
+          )
+          (fun ex ->
+             Log.warn (fun f -> f "Error reading device state at %S: %a" path Fmt.exn ex);
+             Lwt.return ()
+          )
     )
 
   let wait_for_frontend_closing id = frontend id >>= closing
@@ -309,5 +317,11 @@ module Make(Xs: Xs_client_lwt.S) = struct
     >>= fun xsc ->
     backend id
     >>= fun path ->
-    Xs.(immediate xsc (fun h -> rm h path))
+    Lwt.catch (fun () ->
+        Xs.(immediate xsc (fun h -> rm h path))
+      )
+      (fun ex ->
+         Log.warn (fun f -> f "XenStore error removing %S: %a" path Fmt.exn ex);
+         Lwt.return_unit
+      )
 end
