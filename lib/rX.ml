@@ -17,6 +17,8 @@
 open Result
 open Sexplib.Std
 
+[@@@ocaml.warning "-32"]  (* cstruct ppx generates unused values *)
+
 module Request = struct
   type t = {
     id: int;

@@ -1,5 +1,10 @@
-##
+## dev
 * Remove use of the OS module and directly use Xenstore code.
+
+## 1.8.0 (2017-12-14):
+* Support client-initiated shutdown (#67, from @talex5)
+* Improve shared ring handling between Netback and Netfront (#68, from @talex5)
+* Fix a number of build errors and improve documentation (various, from @djs55 and @talex5)
 
 ## 1.7.1 (2016-06-16):
 * Switch to jbuilder

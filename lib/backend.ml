@@ -27,6 +27,34 @@ module Log = (val Logs.src_log src : Logs.LOG)
 
 let return = Lwt.return
 
+module Cleanup : sig
+  type t
+  (** A stack of (cleanup) actions to perform.
+      This is a bit like [Lwt_switch], but ensures things happen in order. *)
+
+  val create : unit -> t
+
+  val push : t -> (unit -> unit Lwt.t) -> unit
+  (** [push t fn] adds [fn] to the stack of clean-up operations to perform. *)
+
+  val perform : t -> unit Lwt.t
+  (** [perform t] pops and performs actions from the stack until it is empty. *)
+end = struct
+  type t = (unit -> unit Lwt.t) Stack.t
+
+  let create = Stack.create
+
+  let push t fn = Stack.push fn t
+
+  let rec perform t =
+    if Stack.is_empty t then Lwt.return_unit
+    else (
+      let fn = Stack.pop t in
+      fn () >>= fun () ->
+      perform t
+    )
+end
+
 module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   exception Netback_shutdown
 
@@ -55,28 +83,30 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
 
   let create ~switch ~domid ~device_id =
     let id = `Server (domid, device_id) in
-    Lwt_switch.add_hook (Some switch) (fun () -> C.disconnect_backend id);
+    let cleanup = Cleanup.create () in
+    Lwt_switch.add_hook (Some switch) (fun () -> Cleanup.perform cleanup);
+    Cleanup.push cleanup (fun () -> C.disconnect_backend id);
     C.read_mac id >>= fun mac ->
     C.init_backend id Features.supported >>= fun backend_configuration ->
     let frontend_id = backend_configuration.S.frontend_id in
     C.read_frontend_configuration id >>= fun f ->
     let channel = Eventchn.bind_interdomain h frontend_id (int_of_string f.S.event_channel) in
-    Lwt_switch.add_hook (Some switch) (fun () -> Eventchn.unbind h channel; return ());
+    Cleanup.push cleanup (fun () -> Eventchn.unbind h channel; return ());
     (* Note: TX and RX are from netfront's point of view (e.g. we receive on TX). *)
     let from_netfront =
       let tx_gnt = {Gnt.Gnttab.domid = frontend_id; ref = Int32.to_int f.S.tx_ring_ref} in
       let mapping = Gnt.Gnttab.map_exn gnttab tx_gnt true in
-      Lwt_switch.add_hook (Some switch) (fun () -> Gnt.Gnttab.unmap_exn gnttab mapping; return ());
+      Cleanup.push cleanup (fun () -> Gnt.Gnttab.unmap_exn gnttab mapping; return ());
       let buf = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-      let sring = Ring.Rpc.of_buf ~buf ~idx_size:TX.total_size
+      let sring = Ring.Rpc.of_buf_no_init ~buf ~idx_size:TX.total_size
         ~name:("Netif.Backend.TX." ^ backend_configuration.S.backend) in
       Ring.Rpc.Back.init ~sring in
     let to_netfront =
       let rx_gnt = {Gnt.Gnttab.domid = frontend_id; ref = Int32.to_int f.S.rx_ring_ref} in
       let mapping = Gnt.Gnttab.map_exn gnttab rx_gnt true in
-      Lwt_switch.add_hook (Some switch) (fun () -> Gnt.Gnttab.unmap_exn gnttab mapping; return ());
+      Cleanup.push cleanup (fun () -> Gnt.Gnttab.unmap_exn gnttab mapping; return ());
       let buf = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-      let sring = Ring.Rpc.of_buf ~buf ~idx_size:RX.total_size
+      let sring = Ring.Rpc.of_buf_no_init ~buf ~idx_size:RX.total_size
         ~name:("Netif.Backend.RX." ^ backend_configuration.S.backend) in
       Ring.Rpc.Back.init ~sring in
     let stats = Stats.create () in
@@ -90,12 +120,16 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       to_netfront = Some to_netfront; from_netfront = Some from_netfront; rx_reqs;
       get_free_mutex; write_mutex;
       stats; mac; } in
-    Lwt_switch.add_hook (Some switch) (fun () ->
+    Cleanup.push cleanup (fun () ->
       t.to_netfront <- None;
       t.from_netfront <- None;
       return ()
     );
-    Lwt.async (fun () -> C.wait_for_backend_closing id >>= fun () -> Lwt_switch.turn_off switch);
+    Lwt.async (fun () ->
+        C.wait_for_frontend_closing id >>= fun () ->
+        Log.info (fun f -> f "Frontend asked to close network device dom:%d/vif:%d" domid device_id);
+        Lwt_switch.turn_off switch
+      );
     return t
 
   let make ~domid ~device_id =
@@ -165,7 +199,12 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       if notify then Eventchn.notify h t.channel;
       OS.Activations.after t.channel after
       >>= loop in
-    loop OS.Activations.program_start >|= fun () -> Ok ()
+    Lwt.catch
+      (fun () -> loop OS.Activations.program_start >|= fun `Never_returns -> assert false)
+      (function
+        | Netback_shutdown -> Lwt.return (Ok ())
+        | ex -> Lwt.fail ex
+      )
 
   let to_netfront t =
     match t.to_netfront with
@@ -174,7 +213,8 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
 
   (* We need [n] pages to send a packet to the frontend. The Ring.Back API
      gives us all the requests that are available at once. Since we may need
-     fewer of this, stash them in the t.rx_reqs sequence. *)
+     fewer of this, stash them in the t.rx_reqs sequence.
+     Raises [Netback_shutdown] if the interface has been shut down. *)
   let get_n_grefs t n =
     let rec take seq = function
     | 0 -> []
@@ -200,35 +240,42 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     )
 
   let writev t buf =
-    let total_size = Cstruct.lenv buf in
-    let pages_needed = max 1 @@ Io_page.round_to_page_size total_size / Io_page.page_size in
-    (* Collect enough free pages from the client. *)
-    get_n_grefs t pages_needed
-    >>= fun reqs ->
-    Lwt_mutex.with_lock t.write_mutex (fun () ->
-      let rec fill_reqs ~src ~is_first = function
-        | r :: rs ->
-            let gnt = {Gnt.Gnttab.domid = t.frontend_id; ref = Int32.to_int r.RX.Request.gref} in
-            let mapping = Gnt.Gnttab.map_exn gnttab gnt true in
-            let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-            let len, src = Cstruct.fillv ~src ~dst in
-            Gnt.Gnttab.unmap_exn gnttab mapping;
-            let slot =
-              let ring = to_netfront t in
-              Ring.Rpc.Back.(slot ring (next_res_id ring)) in
-            let size = Ok (if is_first then total_size else len) in
-            let flags = if rs = [] then Flags.empty else Flags.more_data in
-            let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
-            RX.Response.write resp slot;
-            fill_reqs ~src ~is_first:false rs
-        | [] when Cstruct.lenv src = 0 -> ()
-        | [] -> failwith "BUG: not enough pages for data!" in
-      fill_reqs ~src:buf ~is_first:true reqs;
-      Stats.tx t.stats (Int64.of_int total_size);
-      return ()
-    ) >|= fun () -> Ok (
-      if Ring.Rpc.Back.push_responses_and_check_notify (to_netfront t)
-      then Eventchn.notify h t.channel)
+    Lwt.catch
+      (fun () ->
+         let total_size = Cstruct.lenv buf in
+         let pages_needed = max 1 @@ Io_page.round_to_page_size total_size / Io_page.page_size in
+         (* Collect enough free pages from the client. *)
+         get_n_grefs t pages_needed
+         >>= fun reqs ->
+         Lwt_mutex.with_lock t.write_mutex (fun () ->
+             let rec fill_reqs ~src ~is_first = function
+               | r :: rs ->
+                 let gnt = {Gnt.Gnttab.domid = t.frontend_id; ref = Int32.to_int r.RX.Request.gref} in
+                 let mapping = Gnt.Gnttab.map_exn gnttab gnt true in
+                 let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+                 let len, src = Cstruct.fillv ~src ~dst in
+                 Gnt.Gnttab.unmap_exn gnttab mapping;
+                 let slot =
+                   let ring = to_netfront t in
+                   Ring.Rpc.Back.(slot ring (next_res_id ring)) in
+                 let size = Ok (if is_first then total_size else len) in
+                 let flags = if rs = [] then Flags.empty else Flags.more_data in
+                 let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
+                 RX.Response.write resp slot;
+                 fill_reqs ~src ~is_first:false rs
+               | [] when Cstruct.lenv src = 0 -> ()
+               | [] -> failwith "BUG: not enough pages for data!" in
+             fill_reqs ~src:buf ~is_first:true reqs;
+             Stats.tx t.stats (Int64.of_int total_size);
+             return ()
+           ) >|= fun () -> Ok (
+           if Ring.Rpc.Back.push_responses_and_check_notify (to_netfront t)
+           then Eventchn.notify h t.channel)
+      )
+      (function
+        | Netback_shutdown -> Lwt.return (Error `Disconnected)
+        | ex -> Lwt.fail ex
+      )
 
   let write t buf = writev t [buf]
 

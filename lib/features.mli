@@ -17,10 +17,20 @@
 type t = {
   rx_copy: bool;
   rx_flip: bool;
-  rx_notify: bool;
-  sg: bool;
-  gso_tcpv4: bool;
+  rx_notify: bool;  (* Client sends notifications for rx requests. *)
+  sg: bool;         (* Scatter/gather IO *)
+  gso_tcpv4: bool;  (* Can handle large TCP packets *)
   smart_poll: bool;
+  (* Unsupported:
+     - split-event-channels (TX and RX notifications use separate channels)
+     - multi-queue-{max,num}-queues
+     - no-csum-offload      (IPv4 TCP/UDP checksum offload)
+     - ipv6-csum-offload    (IPv6 TCP/UDP checksum offload)
+     - gso_tcpv6
+     - multicast-control    (filter ethernet multicast packets in the backend)
+     - dynamic-multicast-control (multicast-control can be set at any time)
+     - ctrl-ring            (used for some extra features, e.g. hashes and static grants)
+   *)
 } [@@deriving sexp]
 (** All the features of which news has reached harvard; there may be others
     but they haven't been discovered *)
