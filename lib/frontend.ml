@@ -16,7 +16,7 @@
 
 open Lwt.Infix
 open Printf
-open OS
+open Mirage_xenstore_transport
 open Result
 open Mirage_net
 

@@ -31,6 +31,9 @@ let (/) a b =
   )
 
 module Make(Xs: Xs_client_lwt.S) = struct
+
+  module OS = Mirage_xenstore_transport
+
   open S
 
   type 'a io = 'a Lwt.t

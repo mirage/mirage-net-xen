@@ -20,6 +20,8 @@ open Lwt.Infix
 open Result
 open Mirage_net
 
+module OS = Mirage_xenstore_transport
+
 let src = Logs.Src.create "net-xen:backend" ~doc:"Mirage's Xen netback"
 module Log = (val Logs.src_log src : Logs.LOG)
 

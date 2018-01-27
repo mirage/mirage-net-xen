@@ -1,3 +1,6 @@
+##
+* Remove use of the OS module and directly use Xenstore code.
+
 ## 1.7.1 (2016-06-16):
 * Switch to jbuilder
 * Add topkg
