@@ -1,3 +1,6 @@
+## unreleased
+* require OCaml 4.03, remove "result" dependency
+
 ## 1.8.0 (2017-12-14):
 * Support client-initiated shutdown (#67, from @talex5)
 * Improve shared ring handling between Netback and Netfront (#68, from @talex5)
