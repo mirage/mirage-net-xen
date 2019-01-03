@@ -49,7 +49,6 @@ let create_tx (id, domid) =
 
 module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   type 'a io = 'a Lwt.t
-  type page_aligned_buffer = Io_page.t
   type buffer = Cstruct.t
   type macaddr = Macaddr.t
   type error = Mirage_net.error
@@ -60,6 +59,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     backend_id: int;
     backend: string;      (* Path in XenStore *)
     mac: Macaddr.t;
+    mtu: int;
 
     (* To transmit, we take half-pages from [Shared_page_pool], copy the data to them,
        and push the ref to the ring. *)
@@ -135,9 +135,10 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     let tx_pool = Shared_page_pool.make grant_tx_page in
     (* Register callback activation *)
     let backend = backend_conf.S.backend in
+    let mtu = 1514 in (* TODO *)
     return { vif_id; backend_id; tx_client; tx_gnt; tx_mutex; tx_pool;
              rx_gnt; rx_fring; rx_client; rx_map; rx_id = 0 ; stats;
-             evtchn; mac; backend; features;
+             evtchn; mac; mtu; backend; features;
            }
 
   (** Set of active block devices *)
@@ -388,6 +389,13 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
 
   (* The Xenstore MAC address is colon separated, very helpfully *)
   let mac nf = nf.t.mac
+  let mtu nf = nf.t.mtu
+
+  let allocate_frame ?size nf =
+    let mtu = mtu nf in
+    let size' = match size with None -> mtu | Some s -> min s mtu in
+    let data = Io_page.get (max 1 (size' lsr 12)) in
+    Cstruct.sub (Io_page.to_cstruct data) 0 size'
 
   let get_stats_counters t = t.t.stats
 

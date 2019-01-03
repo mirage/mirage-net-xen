@@ -60,7 +60,6 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   type +'a io = 'a Lwt.t
   type macaddr = Macaddr.t
   type buffer = Cstruct.t
-  type page_aligned_buffer = Io_page.t
   type error = Mirage_net.error
   let pp_error = Mirage_net.pp_error
 
@@ -68,6 +67,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     channel: Eventchn.t;
     frontend_id: int;
     mac: Macaddr.t;
+    mtu: int;
     backend_configuration: S.backend_configuration;
     mutable to_netfront: (RX.Response.t,int) Ring.Rpc.Back.t option;
     rx_reqs: RX.Request.t Lwt_sequence.t;         (* Grants we can write into *)
@@ -114,11 +114,12 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     C.connect id >>= fun () ->
     let write_mutex = Lwt_mutex.create () in
     let get_free_mutex = Lwt_mutex.create () in
+    let mtu = 1514 in (* TODO *)
     let t = {
       channel; frontend_id; backend_configuration;
       to_netfront = Some to_netfront; from_netfront = Some from_netfront; rx_reqs;
       get_free_mutex; write_mutex;
-      stats; mac; } in
+      stats; mac; mtu; } in
     Cleanup.push cleanup (fun () ->
       t.to_netfront <- None;
       t.from_netfront <- None;
@@ -282,6 +283,13 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   let reset_stats_counters t = Stats.reset t.stats
 
   let mac t = t.mac
+  let mtu t = t.mtu
+
+  let allocate_frame ?size nf =
+    let mtu = mtu nf in
+    let size' = match size with None -> mtu | Some s -> min s mtu in
+    let data = Io_page.get (max 1 (size' lsr 12)) in
+    Cstruct.sub (Io_page.to_cstruct data) 0 size'
 
   let disconnect _t = failwith "TODO: disconnect"
 end
