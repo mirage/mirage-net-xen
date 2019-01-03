@@ -49,17 +49,17 @@ let create_tx (id, domid) =
 
 module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   type 'a io = 'a Lwt.t
-  type page_aligned_buffer = Io_page.t
   type buffer = Cstruct.t
   type macaddr = Macaddr.t
-  type error = Mirage_net.error
-  let pp_error = Mirage_net.pp_error
+  type error = Mirage_net.Net.error
+  let pp_error = Mirage_net.Net.pp_error
 
   type transport = {
     vif_id: int;
     backend_id: int;
     backend: string;      (* Path in XenStore *)
     mac: Macaddr.t;
+    mtu: int;
 
     (* To transmit, we take half-pages from [Shared_page_pool], copy the data to them,
        and push the ref to the ring. *)
@@ -135,9 +135,10 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     let tx_pool = Shared_page_pool.make grant_tx_page in
     (* Register callback activation *)
     let backend = backend_conf.S.backend in
+    C.read_mtu id >>= fun mtu ->
     return { vif_id; backend_id; tx_client; tx_gnt; tx_mutex; tx_pool;
              rx_gnt; rx_fring; rx_client; rx_map; rx_id = 0 ; stats;
-             evtchn; mac; backend; features;
+             evtchn; mac; mtu; backend; features;
            }
 
   (** Set of active block devices *)
@@ -292,8 +293,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
         size
       } in
       Lwt_ring.Front.write nf.t.tx_client
-          (fun slot -> TX.Request.write request slot; id)
-      >>= fun replied ->
+          (fun slot -> TX.Request.write request slot; id) >>= fun replied ->
       (* request has been written; when replied returns we have a reply *)
       let release = replied >>= fun reply ->
         let open TX.Response in
@@ -305,33 +305,55 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       return (datav, release)
     )
 
-  (* Transmit a packet from buffer, with offset and length.
+  (* Transmit a packet applying fillf
    * The buffer's data must fit in a single block. *)
-  let write_already_locked nf datav =
-    write_request ~flags:Flags.empty nf datav
-    >>= fun (remaining, th) ->
-    assert (Cstruct.lenv remaining = 0);
+  let write_already_locked nf ~size fillf =
+    Shared_page_pool.use nf.t.tx_pool (fun ~id gref shared_block ->
+        let len = 14 + fillf shared_block in
+        if len > size then failwith "length exceeds size" ;
+        Stats.tx nf.t.stats (Int64.of_int len);
+        let request = { TX.Request.
+          id;
+          gref = Int32.of_int gref;
+          offset = shared_block.Cstruct.off;
+          flags = Flags.empty;
+          size = len
+        } in
+        Lwt_ring.Front.write nf.t.tx_client
+          (fun slot -> TX.Request.write request slot; id) >>= fun replied ->
+        (* request has been written; when replied returns we have a reply *)
+        let release = replied >>= fun reply ->
+          let open TX.Response in
+          match reply.status with
+          | DROPPED -> failwith "Netif: backend dropped our frame"
+          | NULL -> failwith "Netif: NULL response"
+          | ERROR -> failwith "Netif: ERROR response"
+          | OKAY -> return () in
+        return ((), release)) >>= fun ((), th) ->
     Lwt_ring.Front.push nf.t.tx_client (notify nf.t);
     return th
 
   (* Transmit a packet from a list of pages *)
-  let writev_no_retry nf datav =
-    let size = Cstruct.lenv datav in
+  let write_no_retry nf ~size fillf =
+    let size = 14 + size in
     let numneeded = Shared_page_pool.blocks_needed size in
     Lwt_mutex.with_lock nf.t.tx_mutex
       (fun () ->
-         Lwt_ring.Front.wait_for_free nf.t.tx_client numneeded
-         >>= fun () ->
+         Lwt_ring.Front.wait_for_free nf.t.tx_client numneeded >>= fun () ->
          match numneeded with
          | 0 -> return (return ())
          | 1 ->
            (* If there is only one block, then just write it normally *)
-           write_already_locked nf datav
+           write_already_locked nf ~size fillf
          | n ->
+           let datav = Cstruct.create size in
+           let len = 14 + fillf datav in
+           if len > size then failwith "length exceeds total size" ;
+           let datav = Cstruct.sub datav 0 len in
            (* For Xen Netfront, the first fragment contains the entire packet
             * length, which the backend will use to consume the remaining
             * fragments until the full length is satisfied *)
-           write_request ~flags:Flags.more_data ~size nf datav
+           write_request ~flags:Flags.more_data ~size:len nf [datav]
            >>= fun (datav, first_th) ->
            let rec xmit datav = function
              | 0 -> return []
@@ -353,20 +375,22 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
            return (Lwt.join (first_th :: rest_th))
       )
 
-  let rec writev nf datav =
-    Lwt.catch
-      (fun () -> writev_no_retry nf datav)
-      (function
-       | Lwt_ring.Shutdown -> return (Lwt.fail Lwt_ring.Shutdown)
-       | e -> Lwt.fail e)
-    >>= fun released ->
-    Lwt.on_failure released (function
-      | Lwt_ring.Shutdown -> ignore (writev nf datav)
-      | ex -> raise ex
-    );
-    return (Ok ())
-
-  let write nf data = writev nf [data]
+  let rec write nf ?size fillf =
+    let size = match size with None -> nf.t.mtu | Some s -> s in
+    if size > nf.t.mtu then
+      Lwt.return (Error `Exceeds_mtu)
+    else
+      Lwt.catch
+        (fun () -> write_no_retry nf ~size fillf)
+        (function
+          | Lwt_ring.Shutdown -> return (Lwt.fail Lwt_ring.Shutdown)
+          | e -> Lwt.fail e)
+      >>= fun released ->
+      Lwt.on_failure released (function
+          | Lwt_ring.Shutdown -> ignore (write nf ~size fillf)
+          | ex -> raise ex
+        );
+      return (Ok ())
 
   let resume (id,t) =
     plug_inner id
@@ -388,6 +412,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
 
   (* The Xenstore MAC address is colon separated, very helpfully *)
   let mac nf = nf.t.mac
+  let mtu nf = nf.t.mtu
 
   let get_stats_counters t = t.t.stats
 
