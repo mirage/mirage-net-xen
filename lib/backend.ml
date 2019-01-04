@@ -114,7 +114,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     C.connect id >>= fun () ->
     let write_mutex = Lwt_mutex.create () in
     let get_free_mutex = Lwt_mutex.create () in
-    let mtu = 1514 in (* TODO *)
+    C.read_mtu id >>= fun mtu ->
     let t = {
       channel; frontend_id; backend_configuration;
       to_netfront = Some to_netfront; from_netfront = Some from_netfront; rx_reqs;

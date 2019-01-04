@@ -135,7 +135,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     let tx_pool = Shared_page_pool.make grant_tx_page in
     (* Register callback activation *)
     let backend = backend_conf.S.backend in
-    let mtu = 1514 in (* TODO *)
+    C.read_mtu id >>= fun mtu ->
     return { vif_id; backend_id; tx_client; tx_gnt; tx_mutex; tx_pool;
              rx_gnt; rx_fring; rx_client; rx_map; rx_id = 0 ; stats;
              evtchn; mac; mtu; backend; features;

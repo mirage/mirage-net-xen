@@ -79,6 +79,8 @@ module Make(Xs: Xs_client_lwt.S) = struct
         (Sexplib.Sexp.to_string (S.sexp_of_id id)) msg Macaddr.pp m);
       return m
 
+  let read_mtu _id = return 1514 (* TODO *)
+
   let read_features side path =
     Xs.make ()
     >>= fun xsc ->
