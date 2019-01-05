@@ -14,7 +14,6 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
-open Result
 
 module Request : sig
   type error = { impossible : 'a. 'a }  (* No errors *)
@@ -29,7 +28,7 @@ module Request : sig
 
   val write: t -> Cstruct.t -> unit
 
-  val read: Cstruct.t -> t ResultM.t
+  val read: Cstruct.t -> (t, string) result
 
   val flags: t -> Flags.t
 
