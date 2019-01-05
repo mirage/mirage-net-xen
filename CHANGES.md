@@ -1,4 +1,4 @@
-## 1.8.1 (2019-01-05)
+## 1.8.1 (2019-01-07):
 * require OCaml 4.03, remove "result" dependency (#77, from @hannesm)
 * require ipaddr 3.0 (#79, from @hannesm)
 
