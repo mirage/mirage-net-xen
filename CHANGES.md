@@ -1,5 +1,6 @@
-## unreleased
-* require OCaml 4.03, remove "result" dependency
+## 1.8.1 (2019-01-07):
+* require OCaml 4.03, remove "result" dependency (#77, from @hannesm)
+* require ipaddr 3.0 (#79, from @hannesm)
 
 ## 1.8.0 (2017-12-14):
 * Support client-initiated shutdown (#67, from @talex5)
