@@ -8,6 +8,7 @@ env:
   global:
   - PINS="netchannel:. mirage-net-xen:."
   - PACKAGE="mirage-net-xen"
+  - EXTRA_REMOTES="https://github.com/mirage/mirage-dev.git#mirage-net-2.0.0"
   matrix:
   - DISTRO="alpine" OCAML_VERSION="4.04"
   - DISTRO="ubuntu-16.04" OCAML_VERSION="4.05"
