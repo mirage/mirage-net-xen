@@ -1,3 +1,8 @@
+## v1.9.0 (2019-02-04)
+* Port build from jbuilder to dune (@avsm)
+* Switch to dune-release from topkg (@avsm)
+* Clean up opam build depends and ppx (@avsm)
+
 ## v1.8.1 (2019-01-07):
 * require OCaml 4.03, remove "result" dependency (#77, from @hannesm)
 * require ipaddr 3.0 (#79, from @hannesm)
