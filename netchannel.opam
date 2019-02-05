@@ -30,3 +30,10 @@ depends: [
 ]
 tags: "org:mirage"
 synopsis: "Network device for reading and writing Ethernet frames via then Xen netfront/netback protocol"
+description: """
+This library allows an OCaml application to read and
+write Ethernet frames via the [Netfront/netback][xen-net] protocol.
+
+Note: the `Netif` module is the public API.
+The `Netchannel` API is still under development.
+"""
