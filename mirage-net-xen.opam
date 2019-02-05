@@ -20,6 +20,7 @@ depends: [
   "io-page-xen" {>= "2.0.0"}
   "mirage-xen" {>= "1.1.0"}
   "netchannel"
+  "lwt-dlllist"
   "logs" {>= "0.5.0"}
 ]
 tags: "org:mirage"

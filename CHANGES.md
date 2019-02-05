@@ -2,6 +2,7 @@
 * Port build from jbuilder to dune (@avsm)
 * Switch to dune-release from topkg (@avsm)
 * Clean up opam build depends and ppx (@avsm)
+* Use lwt-dllist to remove deprecated `Lwt_sequence` (@avsm)
 
 ## v1.8.1 (2019-01-07):
 * require OCaml 4.03, remove "result" dependency (#77, from @hannesm)

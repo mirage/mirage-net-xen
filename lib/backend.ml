@@ -68,7 +68,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     mac: Macaddr.t;
     backend_configuration: S.backend_configuration;
     mutable to_netfront: (RX.Response.t,int) Ring.Rpc.Back.t option;
-    rx_reqs: RX.Request.t Lwt_sequence.t;         (* Grants we can write into *)
+    rx_reqs: RX.Request.t Lwt_dllist.t;         (* Grants we can write into *)
     mutable from_netfront: (TX.Response.t,int) Ring.Rpc.Back.t option;
     stats: stats;
     write_mutex: Lwt_mutex.t;
@@ -107,7 +107,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
         ~name:("Netif.Backend.RX." ^ backend_configuration.S.backend) in
       Ring.Rpc.Back.init ~sring in
     let stats = Stats.create () in
-    let rx_reqs = Lwt_sequence.create () in
+    let rx_reqs = Lwt_dllist.create () in
     Eventchn.unmask h channel;
     C.connect id >>= fun () ->
     let write_mutex = Lwt_mutex.create () in
@@ -215,17 +215,17 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   let get_n_grefs t n =
     let rec take seq = function
     | 0 -> []
-    | n -> Lwt_sequence.take_l seq :: (take seq (n - 1)) in
+    | n -> Lwt_dllist.take_l seq :: (take seq (n - 1)) in
     let rec loop after =
-      let n' = Lwt_sequence.length t.rx_reqs in
+      let n' = Lwt_dllist.length t.rx_reqs in
       if n' >= n then return (take t.rx_reqs n)
       else begin
         Ring.Rpc.Back.ack_requests (to_netfront t)
           (fun slot ->
             let req = RX.Request.read slot in
-            ignore(Lwt_sequence.add_r req t.rx_reqs)
+            ignore(Lwt_dllist.add_r req t.rx_reqs)
           );
-        if Lwt_sequence.length t.rx_reqs <> n'
+        if Lwt_dllist.length t.rx_reqs <> n'
         then loop after
         else OS.Activations.after t.channel after >>= loop
       end in
