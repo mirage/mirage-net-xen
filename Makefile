@@ -2,22 +2,16 @@
 .PHONY: build clean test
 
 build:
-	jbuilder build @install --dev
+	dune build
 
 test:
-	jbuilder runtest --dev
+	dune runtest
 
 install:
-	jbuilder install
+	dune install
 
 uninstall:
-	jbuilder uninstall
-
-xen-depends: Dockerfile build.sh
-	docker build -t mirage-net-xen .
-
-xen-build: xen-depends clean
-	docker run -v $(shell pwd):/src mirage-net-xen /build.sh
+	dune uninstall
 
 clean:
-	rm -rf _build
+	dune clean
