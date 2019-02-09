@@ -6,8 +6,9 @@ install: wget https://raw.githubusercontent.com/ocaml/ocaml-travisci-skeleton/ma
 script: bash -ex ./.travis-docker.sh
 env:
   global:
-  - PINS="netchannel:. mirage-net-xen:."
+  - PINS="netchannel.1.10.0:. mirage-net-xen.1.10.0:."
   - PACKAGE="mirage-net-xen"
+  - EXTRA_REMOTES="https://github.com/mirage/mirage-dev.git#layering"
   matrix:
   - DISTRO="alpine" OCAML_VERSION="4.04"
   - DISTRO="ubuntu-16.04" OCAML_VERSION="4.05"
