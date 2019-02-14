@@ -138,7 +138,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
 
   (* Loop checking for incoming requests on the from_netfront ring.
      Frames received will go to [fn]. *)
-  let listen (t: t) fn : (unit, error) result Lwt.t =
+  let listen (t: t) ~header_size:_ fn : (unit, error) result Lwt.t =
     let from_netfront () =
       match t.from_netfront with
       | None -> raise Netback_shutdown
@@ -237,62 +237,57 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       loop OS.Activations.program_start
     )
 
-  let write t ?size fillf =
-    let size = match size with None -> t.mtu | Some s -> s in
-    if size > t.mtu then
-      Lwt.return (Error `Exceeds_mtu)
-    else
-      Lwt.catch
-        (fun () ->
-           let total_size = S.ethernet_header_size + size in
-           let pages_needed = max 1 @@ Io_page.round_to_page_size total_size / Io_page.page_size in
-           (* Collect enough free pages from the client. *)
-           get_n_grefs t pages_needed >>= fun reqs ->
-           Lwt_mutex.with_lock t.write_mutex (fun () ->
-               match reqs with
-               | [ r ] ->
-                 let gnt = {Gnt.Gnttab.domid = t.frontend_id; ref = Int32.to_int r.RX.Request.gref} in
-                 let mapping = Gnt.Gnttab.map_exn gnttab gnt true in
-                 let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-                 let len = S.ethernet_header_size + fillf dst in
-                 if len > total_size then failwith "length exceeds total size" ;
-                 Gnt.Gnttab.unmap_exn gnttab mapping;
-                 let slot =
-                   let ring = to_netfront t in
-                   Ring.Rpc.Back.(slot ring (next_res_id ring)) in
-                 let size = Ok len in
-                 let flags = Flags.empty in
-                 let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
-                 RX.Response.write resp slot;
-                 Stats.tx t.stats (Int64.of_int len);
-                 return ()
-               | reqs ->
-                 let rec fill_reqs ~src ~is_first = function
-                   | r :: rs ->
-                     let gnt = {Gnt.Gnttab.domid = t.frontend_id; ref = Int32.to_int r.RX.Request.gref} in
-                     let mapping = Gnt.Gnttab.map_exn gnttab gnt true in
-                     let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-                     let len, src = Cstruct.fillv ~src ~dst in
-                     Gnt.Gnttab.unmap_exn gnttab mapping;
-                     let slot =
-                       let ring = to_netfront t in
-                       Ring.Rpc.Back.(slot ring (next_res_id ring)) in
-                     let size = Ok (if is_first then total_size else len) in
-                     let flags = if rs = [] then Flags.empty else Flags.more_data in
-                     let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
-                     RX.Response.write resp slot;
-                     fill_reqs ~src ~is_first:false rs
-                   | [] when Cstruct.lenv src = 0 -> ()
-                   | [] -> failwith "BUG: not enough pages for data!" in
-                 (* TODO: find a smarter way to not need to copy around *)
-                 let data = Cstruct.create size in
-                 let len = S.ethernet_header_size + fillf data in
-                 if len > total_size then failwith "length exceeds total size" ;
-                 let src = Cstruct.sub data 0 len in
-                 fill_reqs ~src:[src] ~is_first:true reqs;
-                 Stats.tx t.stats (Int64.of_int len);
-                 return ()
-             ) >|= fun () -> Ok (
+  let write t ~size fillf =
+    Lwt.catch
+      (fun () ->
+         let pages_needed = max 1 @@ Io_page.round_to_page_size size / Io_page.page_size in
+         (* Collect enough free pages from the client. *)
+         get_n_grefs t pages_needed >>= fun reqs ->
+         Lwt_mutex.with_lock t.write_mutex (fun () ->
+             match reqs with
+             | [ r ] ->
+               let gnt = {Gnt.Gnttab.domid = t.frontend_id; ref = Int32.to_int r.RX.Request.gref} in
+               let mapping = Gnt.Gnttab.map_exn gnttab gnt true in
+               let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+               let len = fillf dst in
+               if len > size then failwith "length exceeds total size" ;
+               Gnt.Gnttab.unmap_exn gnttab mapping;
+               let slot =
+                 let ring = to_netfront t in
+                 Ring.Rpc.Back.(slot ring (next_res_id ring)) in
+               let size = Ok len in
+               let flags = Flags.empty in
+               let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
+               RX.Response.write resp slot;
+               Stats.tx t.stats (Int64.of_int len);
+               return ()
+             | reqs ->
+               let rec fill_reqs ~src ~is_first = function
+                 | r :: rs ->
+                   let gnt = {Gnt.Gnttab.domid = t.frontend_id; ref = Int32.to_int r.RX.Request.gref} in
+                   let mapping = Gnt.Gnttab.map_exn gnttab gnt true in
+                   let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+                   let len, src = Cstruct.fillv ~src ~dst in
+                   Gnt.Gnttab.unmap_exn gnttab mapping;
+                   let slot =
+                     let ring = to_netfront t in
+                     Ring.Rpc.Back.(slot ring (next_res_id ring)) in
+                   let size = Ok (if is_first then size else len) in
+                   let flags = if rs = [] then Flags.empty else Flags.more_data in
+                   let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
+                   RX.Response.write resp slot;
+                   fill_reqs ~src ~is_first:false rs
+                 | [] when Cstruct.lenv src = 0 -> ()
+                 | [] -> failwith "BUG: not enough pages for data!" in
+               (* TODO: find a smarter way to not need to copy around *)
+               let data = Cstruct.create size in
+               let len = fillf data in
+               if len > size then failwith "length exceeds total size" ;
+               let src = Cstruct.sub data 0 len in
+               fill_reqs ~src:[src] ~is_first:true reqs;
+               Stats.tx t.stats (Int64.of_int len);
+               return ()
+           ) >|= fun () -> Ok (
            if Ring.Rpc.Back.push_responses_and_check_notify (to_netfront t)
            then Eventchn.notify h t.channel)
       )

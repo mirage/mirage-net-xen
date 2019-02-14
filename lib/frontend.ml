@@ -226,7 +226,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       (resp.TX.Response.id, resp)
     )
 
-  let listen nf receive_callback =
+  let listen nf ~header_size:_ receive_callback =
     MProf.Trace.label "Netchannel.Frontend.listen";
     let rec loop from =
       rx_poll nf.t receive_callback;
@@ -309,7 +309,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
    * The buffer's data must fit in a single block. *)
   let write_already_locked nf ~size fillf =
     Shared_page_pool.use nf.t.tx_pool (fun ~id gref shared_block ->
-        let len = S.ethernet_header_size + fillf shared_block in
+        let len = fillf shared_block in
         if len > size then failwith "length exceeds size" ;
         Stats.tx nf.t.stats (Int64.of_int len);
         let request = { TX.Request.
@@ -335,7 +335,6 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
 
   (* Transmit a packet from a list of pages *)
   let write_no_retry nf ~size fillf =
-    let size = S.ethernet_header_size + size in
     let numneeded = Shared_page_pool.blocks_needed size in
     Lwt_mutex.with_lock nf.t.tx_mutex
       (fun () ->
@@ -347,7 +346,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
            write_already_locked nf ~size fillf
          | n ->
            let datav = Cstruct.create size in
-           let len = S.ethernet_header_size + fillf datav in
+           let len = fillf datav in
            if len > size then failwith "length exceeds total size" ;
            let datav = Cstruct.sub datav 0 len in
            (* For Xen Netfront, the first fragment contains the entire packet
@@ -375,22 +374,18 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
            return (Lwt.join (first_th :: rest_th))
       )
 
-  let rec write nf ?size fillf =
-    let size = match size with None -> nf.t.mtu | Some s -> s in
-    if size > nf.t.mtu then
-      Lwt.return (Error `Exceeds_mtu)
-    else
-      Lwt.catch
-        (fun () -> write_no_retry nf ~size fillf)
-        (function
-          | Lwt_ring.Shutdown -> return (Lwt.fail Lwt_ring.Shutdown)
-          | e -> Lwt.fail e)
-      >>= fun released ->
-      Lwt.on_failure released (function
-          | Lwt_ring.Shutdown -> ignore (write nf ~size fillf)
-          | ex -> raise ex
-        );
-      return (Ok ())
+  let rec write nf ~size fillf =
+    Lwt.catch
+      (fun () -> write_no_retry nf ~size fillf)
+      (function
+        | Lwt_ring.Shutdown -> return (Lwt.fail Lwt_ring.Shutdown)
+        | e -> Lwt.fail e)
+    >>= fun released ->
+    Lwt.on_failure released (function
+        | Lwt_ring.Shutdown -> ignore (write nf ~size fillf)
+        | ex -> raise ex
+      );
+    return (Ok ())
 
   let resume (id,t) =
     plug_inner id
