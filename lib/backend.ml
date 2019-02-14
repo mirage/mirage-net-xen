@@ -244,7 +244,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     else
       Lwt.catch
         (fun () ->
-           let total_size = size + 14 in
+           let total_size = S.ethernet_header_size + size in
            let pages_needed = max 1 @@ Io_page.round_to_page_size total_size / Io_page.page_size in
            (* Collect enough free pages from the client. *)
            get_n_grefs t pages_needed >>= fun reqs ->
@@ -254,7 +254,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
                  let gnt = {Gnt.Gnttab.domid = t.frontend_id; ref = Int32.to_int r.RX.Request.gref} in
                  let mapping = Gnt.Gnttab.map_exn gnttab gnt true in
                  let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-                 let len = 14 + fillf dst in
+                 let len = S.ethernet_header_size + fillf dst in
                  if len > total_size then failwith "length exceeds total size" ;
                  Gnt.Gnttab.unmap_exn gnttab mapping;
                  let slot =
@@ -286,7 +286,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
                    | [] -> failwith "BUG: not enough pages for data!" in
                  (* TODO: find a smarter way to not need to copy around *)
                  let data = Cstruct.create size in
-                 let len = 14 + fillf data in
+                 let len = S.ethernet_header_size + fillf data in
                  if len > total_size then failwith "length exceeds total size" ;
                  let src = Cstruct.sub data 0 len in
                  fill_reqs ~src:[src] ~is_first:true reqs;

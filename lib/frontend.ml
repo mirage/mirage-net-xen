@@ -309,7 +309,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
    * The buffer's data must fit in a single block. *)
   let write_already_locked nf ~size fillf =
     Shared_page_pool.use nf.t.tx_pool (fun ~id gref shared_block ->
-        let len = 14 + fillf shared_block in
+        let len = S.ethernet_header_size + fillf shared_block in
         if len > size then failwith "length exceeds size" ;
         Stats.tx nf.t.stats (Int64.of_int len);
         let request = { TX.Request.
@@ -335,7 +335,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
 
   (* Transmit a packet from a list of pages *)
   let write_no_retry nf ~size fillf =
-    let size = 14 + size in
+    let size = S.ethernet_header_size + size in
     let numneeded = Shared_page_pool.blocks_needed size in
     Lwt_mutex.with_lock nf.t.tx_mutex
       (fun () ->
@@ -347,7 +347,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
            write_already_locked nf ~size fillf
          | n ->
            let datav = Cstruct.create size in
-           let len = 14 + fillf datav in
+           let len = S.ethernet_header_size + fillf datav in
            if len > size then failwith "length exceeds total size" ;
            let datav = Cstruct.sub datav 0 len in
            (* For Xen Netfront, the first fragment contains the entire packet

@@ -34,6 +34,8 @@ type frontend_configuration = {
   feature_requests: Features.t;
 } [@@deriving sexp]
 
+let ethernet_header_size = 14
+
 module type CONFIGURATION = sig
 
   type 'a io
