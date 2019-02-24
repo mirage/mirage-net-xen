@@ -58,14 +58,14 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   type +'a io = 'a Lwt.t
   type macaddr = Macaddr.t
   type buffer = Cstruct.t
-  type page_aligned_buffer = Io_page.t
-  type error = Mirage_net.error
-  let pp_error = Mirage_net.pp_error
+  type error = Mirage_net.Net.error
+  let pp_error = Mirage_net.Net.pp_error
 
   type t = {
     channel: Eventchn.t;
     frontend_id: int;
     mac: Macaddr.t;
+    mtu: int;
     backend_configuration: S.backend_configuration;
     mutable to_netfront: (RX.Response.t,int) Ring.Rpc.Back.t option;
     rx_reqs: RX.Request.t Lwt_dllist.t;         (* Grants we can write into *)
@@ -112,11 +112,12 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     C.connect id >>= fun () ->
     let write_mutex = Lwt_mutex.create () in
     let get_free_mutex = Lwt_mutex.create () in
+    C.read_mtu id >>= fun mtu ->
     let t = {
       channel; frontend_id; backend_configuration;
       to_netfront = Some to_netfront; from_netfront = Some from_netfront; rx_reqs;
       get_free_mutex; write_mutex;
-      stats; mac; } in
+      stats; mac; mtu; } in
     Cleanup.push cleanup (fun () ->
       t.to_netfront <- None;
       t.from_netfront <- None;
@@ -137,7 +138,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
 
   (* Loop checking for incoming requests on the from_netfront ring.
      Frames received will go to [fn]. *)
-  let listen (t: t) fn : (unit, error) result Lwt.t =
+  let listen (t: t) ~header_size:_ fn : (unit, error) result Lwt.t =
     let from_netfront () =
       match t.from_netfront with
       | None -> raise Netback_shutdown
@@ -236,35 +237,56 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       loop OS.Activations.program_start
     )
 
-  let writev t buf =
+  let write t ~size fillf =
     Lwt.catch
       (fun () ->
-         let total_size = Cstruct.lenv buf in
-         let pages_needed = max 1 @@ Io_page.round_to_page_size total_size / Io_page.page_size in
+         let pages_needed = max 1 @@ Io_page.round_to_page_size size / Io_page.page_size in
          (* Collect enough free pages from the client. *)
-         get_n_grefs t pages_needed
-         >>= fun reqs ->
+         get_n_grefs t pages_needed >>= fun reqs ->
          Lwt_mutex.with_lock t.write_mutex (fun () ->
-             let rec fill_reqs ~src ~is_first = function
-               | r :: rs ->
-                 let gnt = {Gnt.Gnttab.domid = t.frontend_id; ref = Int32.to_int r.RX.Request.gref} in
-                 let mapping = Gnt.Gnttab.map_exn gnttab gnt true in
-                 let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-                 let len, src = Cstruct.fillv ~src ~dst in
-                 Gnt.Gnttab.unmap_exn gnttab mapping;
-                 let slot =
-                   let ring = to_netfront t in
-                   Ring.Rpc.Back.(slot ring (next_res_id ring)) in
-                 let size = Ok (if is_first then total_size else len) in
-                 let flags = if rs = [] then Flags.empty else Flags.more_data in
-                 let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
-                 RX.Response.write resp slot;
-                 fill_reqs ~src ~is_first:false rs
-               | [] when Cstruct.lenv src = 0 -> ()
-               | [] -> failwith "BUG: not enough pages for data!" in
-             fill_reqs ~src:buf ~is_first:true reqs;
-             Stats.tx t.stats (Int64.of_int total_size);
-             return ()
+             match reqs with
+             | [ r ] ->
+               let gnt = {Gnt.Gnttab.domid = t.frontend_id; ref = Int32.to_int r.RX.Request.gref} in
+               let mapping = Gnt.Gnttab.map_exn gnttab gnt true in
+               let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+               let len = fillf dst in
+               if len > size then failwith "length exceeds total size" ;
+               Gnt.Gnttab.unmap_exn gnttab mapping;
+               let slot =
+                 let ring = to_netfront t in
+                 Ring.Rpc.Back.(slot ring (next_res_id ring)) in
+               let size = Ok len in
+               let flags = Flags.empty in
+               let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
+               RX.Response.write resp slot;
+               Stats.tx t.stats (Int64.of_int len);
+               return ()
+             | reqs ->
+               let rec fill_reqs ~src ~is_first = function
+                 | r :: rs ->
+                   let gnt = {Gnt.Gnttab.domid = t.frontend_id; ref = Int32.to_int r.RX.Request.gref} in
+                   let mapping = Gnt.Gnttab.map_exn gnttab gnt true in
+                   let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+                   let len, src = Cstruct.fillv ~src ~dst in
+                   Gnt.Gnttab.unmap_exn gnttab mapping;
+                   let slot =
+                     let ring = to_netfront t in
+                     Ring.Rpc.Back.(slot ring (next_res_id ring)) in
+                   let size = Ok (if is_first then size else len) in
+                   let flags = if rs = [] then Flags.empty else Flags.more_data in
+                   let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
+                   RX.Response.write resp slot;
+                   fill_reqs ~src ~is_first:false rs
+                 | [] when Cstruct.lenv src = 0 -> ()
+                 | [] -> failwith "BUG: not enough pages for data!" in
+               (* TODO: find a smarter way to not need to copy around *)
+               let data = Cstruct.create size in
+               let len = fillf data in
+               if len > size then failwith "length exceeds total size" ;
+               let src = Cstruct.sub data 0 len in
+               fill_reqs ~src:[src] ~is_first:true reqs;
+               Stats.tx t.stats (Int64.of_int len);
+               return ()
            ) >|= fun () -> Ok (
            if Ring.Rpc.Back.push_responses_and_check_notify (to_netfront t)
            then Eventchn.notify h t.channel)
@@ -274,12 +296,11 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
         | ex -> Lwt.fail ex
       )
 
-  let write t buf = writev t [buf]
-
   let get_stats_counters t = t.stats
   let reset_stats_counters t = Stats.reset t.stats
 
   let mac t = t.mac
+  let mtu t = t.mtu
 
   let disconnect _t = failwith "TODO: disconnect"
 end
