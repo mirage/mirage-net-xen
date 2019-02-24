@@ -1,3 +1,6 @@
+## v1.10.0 (2019-02-24)
+* Adapt to mirage-net 2.0.0 changes (@hannesm)
+
 ## v1.9.0 (2019-02-04)
 * Port build from jbuilder to dune (@avsm)
 * Switch to dune-release from topkg (@avsm)
