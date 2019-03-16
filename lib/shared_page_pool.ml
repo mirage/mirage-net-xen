@@ -16,17 +16,20 @@
 
 open Lwt.Infix
 
+module Gntref = OS.Xen.Gntref
+module Export = OS.Xen.Export
+
 let return = Lwt.return
 
 let max_pages = 256
 
 type block = {
   id : Cstruct.uint16;
-  gref : Gnt.gntref;
+  gref : Gntref.t;
   data : Cstruct.t;
 }
 type t = {
-  grant : Gnt.gntref -> Io_page.t -> unit;
+  grant : Gntref.t -> Io_page.t -> unit;
   mutable next_id : Cstruct.uint16;
   mutable blocks : block list;
   mutable in_use : int;
@@ -45,8 +48,7 @@ let shutdown t =
   if t.in_use = 0 then (
     t.blocks |> List.iter (fun {id = _; gref; data} ->
       if data.Cstruct.off = 0 then (
-        Gnt.Gntshr.end_access gref;
-        Gnt.Gntshr.put gref;
+        Lwt.async (fun () -> Export.end_access ~release_ref:true gref)
       )
     );
     t.blocks <- []
@@ -56,7 +58,7 @@ let shutdown t =
 let alloc t =
   let page = Io_page.get 1 in
   (* (the Xen version of caml_alloc_pages clears the page, so we don't have to) *)
-  Gnt.Gntshr.get () >>= fun gnt ->
+  Export.get () >>= fun gnt ->
   t.grant gnt page;
   return (gnt, Io_page.to_cstruct page)
 

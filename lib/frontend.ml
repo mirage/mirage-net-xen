@@ -18,6 +18,9 @@ open Lwt.Infix
 open OS
 open Mirage_net
 
+module Gntref = OS.Xen.Gntref
+module Export = OS.Xen.Export
+
 let src = Logs.Src.create "net-xen:frontend" ~doc:"Mirage's Xen netfront"
 module Log = (val Logs.src_log src : Logs.LOG)
 
@@ -26,12 +29,12 @@ let return = Lwt.return
 let allocate_ring ~domid =
   let page = Io_page.get 1 in
   let x = Io_page.to_cstruct page in
-  Gnt.Gntshr.get ()
+  Export.get ()
   >>= fun gnt ->
   for i = 0 to Cstruct.len x - 1 do
     Cstruct.set_uint8 x i 0
   done;
-  Gnt.Gntshr.grant_access ~domid ~writable:true gnt page;
+  Export.grant_access ~domid ~writable:true gnt page;
   return (gnt, x)
 
 let create_ring ~domid ~idx_size name =
@@ -64,7 +67,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     (* To transmit, we take half-pages from [Shared_page_pool], copy the data to them,
        and push the ref to the ring. *)
     tx_client: (TX.Response.t,int) Lwt_ring.Front.t;
-    tx_gnt: Gnt.gntref;
+    tx_gnt: Gntref.t;
     tx_mutex: Lwt_mutex.t; (* Held to avoid signalling between fragments *)
     tx_pool: Shared_page_pool.t;
 
@@ -72,8 +75,8 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
        these grants in the rx_ring and wait to be notified that they've been used. *)
     rx_fring: (RX.Response.t,int) Ring.Rpc.Front.t;
     rx_client: (RX.Response.t,int) Lwt_ring.Front.t;
-    rx_map: (int, Gnt.gntref * Io_page.t) Hashtbl.t;
-    rx_gnt: Gnt.gntref;
+    rx_map: (int, Gntref.t * Io_page.t) Hashtbl.t;
+    rx_gnt: Gntref.t;
     mutable rx_id: Cstruct.uint16;
 
     evtchn: Eventchn.t;
@@ -112,8 +115,8 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     let evtchn_port = Eventchn.to_int evtchn in
     (* Write Xenstore info and set state to Connected *)
     let front_conf = { S.
-      tx_ring_ref = Int32.of_int tx_gnt;
-      rx_ring_ref = Int32.of_int rx_gnt;
+      tx_ring_ref = Gntref.to_int32 tx_gnt;
+      rx_ring_ref = Gntref.to_int32 rx_gnt;
       event_channel = string_of_int (evtchn_port);
       feature_requests = { Features.
         rx_copy = true;
@@ -131,7 +134,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     C.wait_until_backend_connected backend_conf >>= fun () ->
     Eventchn.unmask h evtchn;
     let stats = Stats.create () in
-    let grant_tx_page = Gnt.Gntshr.grant_access ~domid:backend_id ~writable:false in
+    let grant_tx_page = Export.grant_access ~domid:backend_id ~writable:false in
     let tx_pool = Shared_page_pool.make grant_tx_page in
     (* Register callback activation *)
     let backend = backend_conf.S.backend in
@@ -149,7 +152,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   let refill_requests nf =
     let num = Ring.Rpc.Front.get_free_requests nf.rx_fring in
     if num > 0 then
-      Gnt.Gntshr.get_n num
+      Export.get_n num
       >>= fun grefs ->
       let pages = Io_page.pages num in
       List.iter
@@ -160,11 +163,11 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
              if Hashtbl.mem nf.rx_map id then next () else id
            in
            let id = next () in
-           Gnt.Gntshr.grant_access ~domid:nf.backend_id ~writable:true gref page;
+           Export.grant_access ~domid:nf.backend_id ~writable:true gref page;
            Hashtbl.add nf.rx_map id (gref, page);
            let slot_id = Ring.Rpc.Front.next_req_id nf.rx_fring in
            let slot = Ring.Rpc.Front.slot nf.rx_fring slot_id in
-           ignore(RX.Request.(write {id; gref = Int32.of_int gref}) slot)
+           ignore(RX.Request.(write {id; gref = Gntref.to_int32 gref}) slot)
         ) (List.combine grefs pages);
       if Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring
       then notify nf ();
@@ -174,9 +177,8 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   let pop_rx_page nf id =
     let gref, page = Hashtbl.find nf.rx_map id in
     Hashtbl.remove nf.rx_map id;
-    Gnt.Gntshr.end_access gref;
-    Gnt.Gntshr.put gref;
-    page
+    Export.end_access ~release_ref:true gref >>= fun () ->
+    Lwt.return page
 
   let rx_poll nf fn =
     let module Recv = Assemble.Make(RX.Response) in
@@ -189,23 +191,23 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     );
     List.rev !q
     |> Recv.group_frames
-    |> List.iter (function
+    |> Lwt_list.iter_s (function
       | Error (e, msgs) ->
-          msgs |> List.iter (fun msg ->
-            let _ : Io_page.t = pop_rx_page nf msg.RX.Response.id in
-            ()
-          );
-          Log.err (fun f -> f "received error: %d" e)
+          Log.err (fun f -> f "received error: %d" e);
+          msgs |> Lwt_list.iter_s (fun msg ->
+            pop_rx_page nf msg.RX.Response.id >>= fun (_ : Io_page.t) ->
+            Lwt.return_unit
+          )
       | Ok frame ->
           let data = Cstruct.create frame.Recv.total_size in
           let next = ref 0 in
-          frame.Recv.fragments |> List.iter (fun {Recv.size; msg} ->
+          frame.Recv.fragments |> Lwt_list.iter_s (fun {Recv.size; msg} ->
             let {RX.Response.id; size = _; flags = _; offset} = msg in
-            let page = pop_rx_page nf id in
+            pop_rx_page nf id >|= fun page ->
             let buf = Io_page.to_cstruct page in
             Cstruct.blit buf offset data !next size;
             next := !next + size
-          );
+          ) >|= fun () ->
           assert (!next = Cstruct.len data);
           Lwt.async (fun () ->
             Stats.rx nf.stats (Int64.of_int (Cstruct.len data));
@@ -228,7 +230,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   let listen nf receive_callback =
     MProf.Trace.label "Netchannel.Frontend.listen";
     let rec loop from =
-      rx_poll nf.t receive_callback;
+      rx_poll nf.t receive_callback >>= fun () ->
       refill_requests nf.t >>= fun () ->
       tx_poll nf.t;
       Activations.after nf.t.evtchn from >>= fun from ->
@@ -286,7 +288,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       Stats.tx nf.t.stats (Int64.of_int size);
       let request = { TX.Request.
         id;
-        gref = Int32.of_int gref;
+        gref = Gntref.to_int32 gref;
         offset = shared_block.Cstruct.off;
         flags;
         size

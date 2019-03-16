@@ -19,6 +19,9 @@
 open Lwt.Infix
 open Mirage_net
 
+module Gntref = OS.Xen.Gntref
+module Import = OS.Xen.Import
+
 let src = Logs.Src.create "net-xen:backend" ~doc:"Mirage's Xen netback"
 module Log = (val Logs.src_log src : Logs.LOG)
 
@@ -76,7 +79,6 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
   }
 
   let h = Eventchn.init ()
-  let gnttab = Gnt.Gnttab.interface_open ()
 
   let create ~switch ~domid ~device_id =
     let id = `Server (domid, device_id) in
@@ -91,18 +93,18 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
     Cleanup.push cleanup (fun () -> Eventchn.unbind h channel; return ());
     (* Note: TX and RX are from netfront's point of view (e.g. we receive on TX). *)
     let from_netfront =
-      let tx_gnt = {Gnt.Gnttab.domid = frontend_id; ref = Int32.to_int f.S.tx_ring_ref} in
-      let mapping = Gnt.Gnttab.map_exn gnttab tx_gnt true in
-      Cleanup.push cleanup (fun () -> Gnt.Gnttab.unmap_exn gnttab mapping; return ());
-      let buf = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+      let tx_gnt = {Import.domid = frontend_id; ref = Gntref.of_int32 f.S.tx_ring_ref} in
+      let mapping = Import.map_exn tx_gnt ~writable:true in
+      Cleanup.push cleanup (fun () -> Import.Local_mapping.unmap_exn mapping; return ());
+      let buf = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
       let sring = Ring.Rpc.of_buf_no_init ~buf ~idx_size:TX.total_size
         ~name:("Netif.Backend.TX." ^ backend_configuration.S.backend) in
       Ring.Rpc.Back.init ~sring in
     let to_netfront =
-      let rx_gnt = {Gnt.Gnttab.domid = frontend_id; ref = Int32.to_int f.S.rx_ring_ref} in
-      let mapping = Gnt.Gnttab.map_exn gnttab rx_gnt true in
-      Cleanup.push cleanup (fun () -> Gnt.Gnttab.unmap_exn gnttab mapping; return ());
-      let buf = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+      let rx_gnt = {Import.domid = frontend_id; ref = Gntref.of_int32 f.S.rx_ring_ref} in
+      let mapping = Import.map_exn rx_gnt ~writable:true in
+      Cleanup.push cleanup (fun () -> Import.Local_mapping.unmap_exn mapping; return ());
+      let buf = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
       let sring = Ring.Rpc.of_buf_no_init ~buf ~idx_size:RX.total_size
         ~name:("Netif.Backend.RX." ^ backend_configuration.S.backend) in
       Ring.Rpc.Back.init ~sring in
@@ -162,23 +164,24 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
             let next = ref 0 in
             frame.Recv.fragments |> Lwt_list.iter_s (fun {Recv.size; msg} ->
               let { TX.Request.flags = _; size = _; offset; gref; id } = msg in
-              let gnt = { Gnt.Gnttab.
+              let gnt = { Import.
                 domid = t.frontend_id;
-                ref = Int32.to_int gref
+                ref = Gntref.of_int32 gref
               } in
-              Gnt.Gnttab.with_mapping gnttab gnt false (function
-                | None -> failwith "Failed to map grant"
-                | Some mapping ->
-                    let buf = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-                    Cstruct.blit buf offset data !next size;
-                    next := !next + size;
-                    let slot =
-                      let ring = from_netfront () in
-                      Ring.Rpc.Back.(slot ring (next_res_id ring)) in
-                    let resp = { TX.Response.id; status = TX.Response.OKAY } in
-                    TX.Response.write resp slot;
-                    return ()
-              )
+              Import.with_mapping gnt ~writable:false (fun mapping ->
+                  let buf = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+                  Cstruct.blit buf offset data !next size;
+                  next := !next + size;
+                  let slot =
+                    let ring = from_netfront () in
+                    Ring.Rpc.Back.(slot ring (next_res_id ring)) in
+                  let resp = { TX.Response.id; status = TX.Response.OKAY } in
+                  TX.Response.write resp slot;
+                  return ()
+                )
+              >|= function
+              | Error (`Msg m) -> failwith m   (* Couldn't map client's grant; give up *)
+              | Ok () -> ()
             ) >|= fun () ->
             assert (!next = Cstruct.len data);
             Stats.rx t.stats (Int64.of_int (Cstruct.len data));
@@ -247,11 +250,11 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
          Lwt_mutex.with_lock t.write_mutex (fun () ->
              let rec fill_reqs ~src ~is_first = function
                | r :: rs ->
-                 let gnt = {Gnt.Gnttab.domid = t.frontend_id; ref = Int32.to_int r.RX.Request.gref} in
-                 let mapping = Gnt.Gnttab.map_exn gnttab gnt true in
-                 let dst = Gnt.Gnttab.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+                 let gnt = {Import.domid = t.frontend_id; ref = Gntref.of_int32 r.RX.Request.gref} in
+                 let mapping = Import.map_exn gnt ~writable:true in
+                 let dst = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
                  let len, src = Cstruct.fillv ~src ~dst in
-                 Gnt.Gnttab.unmap_exn gnttab mapping;
+                 Import.Local_mapping.unmap_exn mapping;
                  let slot =
                    let ring = to_netfront t in
                    Ring.Rpc.Back.(slot ring (next_res_id ring)) in
