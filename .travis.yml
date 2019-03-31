@@ -6,7 +6,7 @@ install: wget https://raw.githubusercontent.com/ocaml/ocaml-travisci-skeleton/ma
 script: bash -ex ./.travis-docker.sh
 env:
   global:
-  - PINS="netchannel.1.10.0:. mirage-net-xen.1.10.0:."
+  - PINS="netchannel:. mirage-net-xen:."
   - PACKAGE="mirage-net-xen"
   - EXTRA_REMOTES="https://github.com/mirage/mirage-dev.git"
   matrix:
