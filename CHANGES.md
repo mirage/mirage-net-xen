@@ -1,3 +1,6 @@
+## v1.10.2 (2019-04-01)
+* Use the new grant API provided by mirage-xen (@talex5 and @yomimono, #85).
+
 ## v1.10.1 (2019-03-20)
 * Zero buffers before calling fill functions (@yomimono and @hannesm, #83).
 
