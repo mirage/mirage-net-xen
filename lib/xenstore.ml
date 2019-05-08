@@ -298,8 +298,9 @@ module Make(Xs: Xs_client_lwt.S) = struct
              Xs.read h (path / "state")
           )
           (fun state ->
-             if OS.Device_state.of_string state = OS.Device_state.Closing then return ()
-             else Lwt.fail Xs_protocol.Eagain
+             match OS.Device_state.of_string state with
+             | OS.Device_state.Closing | Closed -> return ()
+             | _ -> Lwt.fail Xs_protocol.Eagain
           )
           (fun ex ->
              Log.warn (fun f -> f "Error reading device state at %S: %a" path Fmt.exn ex);
