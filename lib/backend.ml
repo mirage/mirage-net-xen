@@ -22,7 +22,7 @@ open Mirage_net
 module Gntref = OS.Xen.Gntref
 module Import = OS.Xen.Import
 
-let src = Logs.Src.create "net-xen:backend" ~doc:"Mirage's Xen netback"
+let src = Logs.Src.create "net-xen backend" ~doc:"Mirage's Xen netback"
 module Log = (val Logs.src_log src : Logs.LOG)
 
 let return = Lwt.return
