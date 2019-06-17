@@ -1,3 +1,8 @@
+## v1.12.0
+* Cope with frontend moving directly to Closed state (@talex5, #89)
+* Remove colons in log prefixes (@yomimono, #91)
+* Use mirage-xen.4.0.0 `Os_xen` interface (@TheLortex, #90)
+
 ## v1.11.0 (2019-05-05)
 * Fix MAC address for netback devices (@talex5, #87).
   This changes the `CONFIGURATION` signature to provide both
