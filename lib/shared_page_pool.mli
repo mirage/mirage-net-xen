@@ -20,11 +20,11 @@
 
 type t
 
-val make : (OS.Xen.Gntref.t -> Io_page.t -> unit) -> t
+val make : (Os_xen.Xen.Gntref.t -> Io_page.t -> unit) -> t
 (** [make grant_access] is a shared pool of blocks. When a new page is first
     allocated, [grant_access] is called to share it. *)
 
-val use : t -> (id:Cstruct.uint16 -> OS.Xen.Gntref.t -> Cstruct.t -> ('a * unit Lwt.t) Lwt.t) -> ('a * unit Lwt.t) Lwt.t
+val use : t -> (id:Cstruct.uint16 -> Os_xen.Xen.Gntref.t -> Cstruct.t -> ('a * unit Lwt.t) Lwt.t) -> ('a * unit Lwt.t) Lwt.t
 (** [use t fn] calls [fn ~id gref block] with a free shared block of memory
     and that block's unique ID (note: the [gref] is NOT unique).
     The function should return a thread that indicates when the request has

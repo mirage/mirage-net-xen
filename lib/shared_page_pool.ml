@@ -16,6 +16,7 @@
 
 open Lwt.Infix
 
+module OS = Os_xen
 module Gntref = OS.Xen.Gntref
 module Export = OS.Xen.Export
 

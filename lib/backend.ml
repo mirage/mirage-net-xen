@@ -19,6 +19,7 @@
 open Lwt.Infix
 open Mirage_net
 
+module OS = Os_xen
 module Gntref = OS.Xen.Gntref
 module Import = OS.Xen.Import
 
