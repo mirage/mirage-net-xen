@@ -1,4 +1,4 @@
-## v1.12.0
+## v1.12.0 (2019-06-26)
 * Cope with frontend moving directly to Closed state (@talex5, #89)
 * Remove colons in log prefixes (@yomimono, #91)
 * Use mirage-xen.4.0.0 `Os_xen` interface (@TheLortex, #90)

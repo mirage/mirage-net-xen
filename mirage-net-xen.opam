@@ -24,10 +24,6 @@ depends: [
   "logs" {>= "0.5.0"}
 ]
 
-pin-depends: [
-  ["mirage-xen.dev" "git+https://github.com/mirage/mirage-xen"]
-]
-
 tags: "org:mirage"
 synopsis: "Network device for reading and writing Ethernet frames via then Xen netfront/netback protocol"
 description: """
