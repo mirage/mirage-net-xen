@@ -17,7 +17,7 @@ open Lwt
 
 module OS = Os_xen
 
-let src = Logs.Src.create "net-xen:xenstore" ~doc:"mirage-net-xen's XenStore client"
+let src = Logs.Src.create "net-xen xenstore" ~doc:"mirage-net-xen's XenStore client"
 module Log = (val Logs.src_log src : Logs.LOG)
 
 let (/) a b =
