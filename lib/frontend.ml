@@ -15,9 +15,7 @@
  *)
 
 open Lwt.Infix
-open Os_xen
 
-module OS = Os_xen
 module Gntref = OS.Xen.Gntref
 module Export = OS.Xen.Export
 
@@ -231,10 +229,10 @@ module Make(C: S.CONFIGURATION) = struct
       rx_poll nf.t receive_callback >>= fun () ->
       refill_requests nf.t >>= fun () ->
       tx_poll nf.t;
-      Activations.after nf.t.evtchn from >>= fun from ->
+      OS.Activations.after nf.t.evtchn from >>= fun from ->
       loop from
     in
-    loop Activations.program_start
+    loop OS.Activations.program_start
 
   let connect id =
     (* If [id] is an integer, use it. Otherwise, return an error message
@@ -415,5 +413,5 @@ module Make(C: S.CONFIGURATION) = struct
 
   let () =
     Log.info (fun f -> f "add resume hook");
-    Sched.add_resume_hook resume
+    OS.Sched.add_resume_hook resume
 end
