@@ -1,3 +1,7 @@
+## v1.13.0 (2019-11-01)
+* Adapt to mirage-xen 5.0.0 API changes (@hannesm, #95)
+* Adapt to mirage-net 3.0.0 API changes (@hannesm, #95)
+
 ## v1.12.0 (2019-06-26)
 * Cope with frontend moving directly to Closed state (@talex5, #89)
 * Remove colons in log prefixes (@yomimono, #91)
