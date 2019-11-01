@@ -15,8 +15,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) : sig
-  include Mirage_net_lwt.S
+module Make(C: S.CONFIGURATION) : sig
+  include Mirage_net.S
   val make: domid:int -> device_id:int -> t Lwt.t
   (** [make ~domid ~device_id] connects a backend connecting to [domid] *)
 

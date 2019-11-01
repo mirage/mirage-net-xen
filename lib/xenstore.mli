@@ -15,4 +15,3 @@
  *)
 
 module Make(Xs: Xs_client_lwt.S) : S.CONFIGURATION
-  with type 'a io = 'a Lwt.t

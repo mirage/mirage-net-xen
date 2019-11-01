@@ -15,10 +15,7 @@
  *)
 
 open Lwt.Infix
-open Os_xen
-open Mirage_net
 
-module OS = Os_xen
 module Gntref = OS.Xen.Gntref
 module Export = OS.Xen.Export
 
@@ -51,10 +48,7 @@ let create_rx (id, domid) =
 let create_tx (id, domid) =
   create_ring ~domid ~idx_size:TX.total_size (Printf.sprintf "Netif.TX.%d" id)
 
-module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
-  type 'a io = 'a Lwt.t
-  type buffer = Cstruct.t
-  type macaddr = Macaddr.t
+module Make(C: S.CONFIGURATION) = struct
   type error = Mirage_net.Net.error
   let pp_error = Mirage_net.Net.pp_error
 
@@ -82,7 +76,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
 
     evtchn: Eventchn.t;
     features: Features.t;
-    stats : stats;
+    stats : Mirage_net.stats;
   }
 
   type t = {
@@ -235,10 +229,10 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
       rx_poll nf.t receive_callback >>= fun () ->
       refill_requests nf.t >>= fun () ->
       tx_poll nf.t;
-      Activations.after nf.t.evtchn from >>= fun from ->
+      OS.Activations.after nf.t.evtchn from >>= fun from ->
       loop from
     in
-    loop Activations.program_start
+    loop OS.Activations.program_start
 
   let connect id =
     (* If [id] is an integer, use it. Otherwise, return an error message
@@ -419,5 +413,5 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
 
   let () =
     Log.info (fun f -> f "add resume hook");
-    Sched.add_resume_hook resume
+    OS.Sched.add_resume_hook resume
 end

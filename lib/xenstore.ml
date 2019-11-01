@@ -15,8 +15,6 @@
  *)
 open Lwt
 
-module OS = Os_xen
-
 let src = Logs.Src.create "net-xen xenstore" ~doc:"mirage-net-xen's XenStore client"
 module Log = (val Logs.src_log src : Logs.LOG)
 
@@ -34,8 +32,6 @@ let (/) a b =
 
 module Make(Xs: Xs_client_lwt.S) = struct
   open S
-
-  type 'a io = 'a Lwt.t
 
   let read_int x =
     try
