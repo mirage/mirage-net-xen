@@ -56,12 +56,9 @@ end = struct
     )
 end
 
-module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
+module Make(C: S.CONFIGURATION) = struct
   exception Netback_shutdown
 
-  type +'a io = 'a Lwt.t
-  type macaddr = Macaddr.t
-  type buffer = Cstruct.t
   type error = Mirage_net.Net.error
   let pp_error = Mirage_net.Net.pp_error
 

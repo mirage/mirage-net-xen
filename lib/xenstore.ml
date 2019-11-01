@@ -35,8 +35,6 @@ let (/) a b =
 module Make(Xs: Xs_client_lwt.S) = struct
   open S
 
-  type 'a io = 'a Lwt.t
-
   let read_int x =
     try
       return (int_of_string x)

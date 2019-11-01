@@ -16,7 +16,6 @@
 
 open Lwt.Infix
 open Os_xen
-open Mirage_net
 
 module OS = Os_xen
 module Gntref = OS.Xen.Gntref
@@ -51,10 +50,7 @@ let create_rx (id, domid) =
 let create_tx (id, domid) =
   create_ring ~domid ~idx_size:TX.total_size (Printf.sprintf "Netif.TX.%d" id)
 
-module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
-  type 'a io = 'a Lwt.t
-  type buffer = Cstruct.t
-  type macaddr = Macaddr.t
+module Make(C: S.CONFIGURATION) = struct
   type error = Mirage_net.Net.error
   let pp_error = Mirage_net.Net.pp_error
 
@@ -82,7 +78,7 @@ module Make(C: S.CONFIGURATION with type 'a io = 'a Lwt.t) = struct
 
     evtchn: Eventchn.t;
     features: Features.t;
-    stats : stats;
+    stats : Mirage_net.stats;
   }
 
   type t = {

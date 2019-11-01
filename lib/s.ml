@@ -35,47 +35,44 @@ type frontend_configuration = {
 } [@@deriving sexp]
 
 module type CONFIGURATION = sig
+  val read_frontend_mac: id -> Macaddr.t Lwt.t
+  val read_backend_mac: id -> Macaddr.t Lwt.t
 
-  type 'a io
+  val read_mtu: id -> int Lwt.t
 
-  val read_frontend_mac: id -> Macaddr.t io
-  val read_backend_mac: id -> Macaddr.t io
-
-  val read_mtu: id -> int io
-
-  val read_frontend_configuration: id -> frontend_configuration io
+  val read_frontend_configuration: id -> frontend_configuration Lwt.t
   (** Waits for the frontend configuration to become available
       and returns it. *)
 
-  val write_frontend_configuration: id -> frontend_configuration -> unit io
+  val write_frontend_configuration: id -> frontend_configuration -> unit Lwt.t
 
   val enumerate: unit -> string list Lwt.t
   (** List the names of available devices. *)
 
-  val connect: id -> unit io
+  val connect: id -> unit Lwt.t
 
-  val disconnect_frontend: id -> unit io
+  val disconnect_frontend: id -> unit Lwt.t
   (** Set the frontend state to Closed. *)
 
-  val disconnect_backend: id -> unit io
+  val disconnect_backend: id -> unit Lwt.t
   (** Delete the backend directory. *)
 
-  val wait_until_backend_connected: backend_configuration -> unit io
+  val wait_until_backend_connected: backend_configuration -> unit Lwt.t
 
-  val read_backend: id -> backend_configuration io
+  val read_backend: id -> backend_configuration Lwt.t
 
-  val init_backend: id -> Features.t -> backend_configuration io
+  val init_backend: id -> Features.t -> backend_configuration Lwt.t
   (** Initialise the configuration for a new backend. *)
 
   val description: string
   (** Human-readable description suitable for help text or
       a manpage *)
 
-  val wait_for_frontend_closing: id -> unit io
+  val wait_for_frontend_closing: id -> unit Lwt.t
   (** [wait_for_frontend_closing id] is a thread that returns when
       [id]'s frontend moves to the closing state. *)
 
-  val wait_for_backend_closing: id -> unit io
+  val wait_for_backend_closing: id -> unit Lwt.t
   (** [wait_for_backend_closing id] is a thread that returns when
       [id]'s backend moves to the closing state. *)
 end
