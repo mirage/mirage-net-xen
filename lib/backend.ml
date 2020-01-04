@@ -187,10 +187,12 @@ module Make(C: S.CONFIGURATION) = struct
             Stats.rx t.stats (Int64.of_int (Cstruct.len data));
             Lwt.async (fun () ->
               Lwt.catch (fun () -> fn data)
-                (fun ex ->
-                   Log.err (fun f -> f "uncaught exception from listen callback while handling frame:@\n@[<v2>  %a@]@\nException: @[%s@]"
-                               Cstruct.hexdump_pp data (Printexc.to_string ex));
-                   Lwt.return ()
+                (function
+                  | Out_of_memory -> Lwt.fail Out_of_memory
+                  | ex ->
+                    Log.err (fun f -> f "uncaught exception from listen callback while handling frame:@\n@[<v2>  %a@]@\nException: @[%s@]"
+                                Cstruct.hexdump_pp data (Printexc.to_string ex));
+                    Lwt.return ()
                 )
               )
       )
