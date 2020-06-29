@@ -254,7 +254,7 @@ module Make(C: S.CONFIGURATION) = struct
                let mapping = Import.map_exn gnt ~writable:true in
                let dst = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
                Cstruct.memset dst 0;
-               let len = fillf dst in
+               let len = fillf (Cstruct.sub dst 0 (t.mtu + 14)) in
                Import.Local_mapping.unmap_exn mapping;
                if len > size then failwith "length exceeds total size" ;
                let slot =
