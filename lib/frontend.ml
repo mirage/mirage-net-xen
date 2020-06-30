@@ -309,7 +309,7 @@ module Make(C: S.CONFIGURATION) = struct
   let write_already_locked nf ~size fillf =
     Shared_page_pool.use nf.t.tx_pool (fun ~id gref shared_block ->
         Cstruct.memset shared_block 0;
-        let len = fillf (Cstruct.sub shared_block 0 (nf.t.mtu + 14)) in
+        let len = fillf (Cstruct.sub shared_block 0 size) in
         if len > size then failwith "length exceeds size" ;
         Stats.tx nf.t.stats (Int64.of_int len);
         let request = { TX.Request.
@@ -339,12 +339,12 @@ module Make(C: S.CONFIGURATION) = struct
     Lwt_mutex.with_lock nf.t.tx_mutex
       (fun () ->
          Lwt_ring.Front.wait_for_free nf.t.tx_client numneeded >>= fun () ->
-         if size = 0 then
-           return (return ())
-         else if size <= nf.t.mtu + 14 then
+         match numneeded with
+         | 0 -> return (return ())
+         | 1 ->
            (* If there is only one block, then just write it normally *)
            write_already_locked nf ~size fillf
-         else
+         | n ->
            let datav = Cstruct.create size in
            let len = fillf datav in
            if len > size then failwith "length exceeds total size" ;
@@ -367,7 +367,7 @@ module Make(C: S.CONFIGURATION) = struct
                  xmit datav (n - 1)
                  >>= fun rest ->
                  return (next_th :: rest) in
-           xmit datav (numneeded - 1)
+           xmit datav (n - 1)
            >>= fun rest_th ->
            (* All fragments are now written, we can now notify the backend *)
            Lwt_ring.Front.push nf.t.tx_client (notify nf.t);
