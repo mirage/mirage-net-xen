@@ -309,7 +309,7 @@ module Make(C: S.CONFIGURATION) = struct
   let write_already_locked nf ~size fillf =
     Shared_page_pool.use nf.t.tx_pool (fun ~id gref shared_block ->
         Cstruct.memset shared_block 0;
-        let len = fillf shared_block in
+        let len = fillf (Cstruct.sub shared_block 0 size) in
         if len > size then failwith "length exceeds size" ;
         Stats.tx nf.t.stats (Int64.of_int len);
         let request = { TX.Request.
