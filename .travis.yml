@@ -9,7 +9,7 @@ env:
   - PINS="netchannel:. mirage-net-xen:."
   - PACKAGE="mirage-net-xen"
   matrix:
-  - DISTRO="alpine" OCAML_VERSION="4.06"
-  - DISTRO="ubuntu-16.04" OCAML_VERSION="4.07"
+  - DISTRO="alpine" OCAML_VERSION="4.10"
+  - DISTRO="ubuntu-16.04" OCAML_VERSION="4.09"
   - DISTRO="debian-testing" OCAML_VERSION="4.08"
   - DISTRO="debian-unstable" OCAML_VERSION="4.08"
