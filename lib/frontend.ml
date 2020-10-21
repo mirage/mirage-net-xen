@@ -74,19 +74,18 @@ module Make(C: S.CONFIGURATION) = struct
     rx_gnt: Gntref.t;
     mutable rx_id: Cstruct.uint16;
 
-    evtchn: Eventchn.t;
+    evtchn: OS.Eventchn.t;
     features: Features.t;
     stats : Mirage_net.stats;
   }
 
   type t = {
     mutable t: transport;
-    mutable resume_fns: (t -> unit Lwt.t) list;
     l : Lwt_mutex.t;
     c : unit Lwt_condition.t;
   }
 
-  let h = Eventchn.init ()
+  let h = OS.Eventchn.init ()
 
   (* Given a VIF ID, construct a netfront record for it *)
   let plug_inner vif_id =
@@ -106,8 +105,8 @@ module Make(C: S.CONFIGURATION) = struct
     create_tx (vif_id, backend_id)
     >>= fun (tx_gnt, _tx_fring, tx_client) ->
     let tx_mutex = Lwt_mutex.create () in
-    let evtchn = Eventchn.bind_unbound_port h backend_id in
-    let evtchn_port = Eventchn.to_int evtchn in
+    let evtchn = OS.Eventchn.bind_unbound_port h backend_id in
+    let evtchn_port = OS.Eventchn.to_int evtchn in
     (* Write Xenstore info and set state to Connected *)
     let front_conf = { S.
       tx_ring_ref = Gntref.to_int32 tx_gnt;
@@ -127,7 +126,7 @@ module Make(C: S.CONFIGURATION) = struct
     (* Wait for backend to accept connection *)
     let rx_map = Hashtbl.create 1 in
     C.wait_until_backend_connected backend_conf >>= fun () ->
-    Eventchn.unmask h evtchn;
+    OS.Eventchn.unmask h evtchn;
     let stats = Stats.create () in
     let grant_tx_page = Export.grant_access ~domid:backend_id ~writable:false in
     let tx_pool = Shared_page_pool.make grant_tx_page in
@@ -143,7 +142,7 @@ module Make(C: S.CONFIGURATION) = struct
   let devices : (int, t) Hashtbl.t = Hashtbl.create 1
 
   let notify nf () =
-    Eventchn.notify h nf.evtchn
+    OS.Eventchn.notify h nf.evtchn
 
   let refill_requests nf =
     let num = Ring.Rpc.Front.get_free_requests nf.rx_fring in
@@ -252,7 +251,7 @@ module Make(C: S.CONFIGURATION) = struct
           let l = Lwt_mutex.create () in
           let c = Lwt_condition.create () in
           (* packets are dropped until listen is called *)
-          let dev = { t; resume_fns=[]; l; c } in
+          let dev = { t; l; c } in
           Hashtbl.add devices id' dev;
           return dev
         end
@@ -387,24 +386,6 @@ module Make(C: S.CONFIGURATION) = struct
       );
     return (Ok ())
 
-  let resume (id,t) =
-    plug_inner id
-    >>= fun transport ->
-    let old_transport = t.t in
-    t.t <- transport;
-    Lwt_list.iter_s (fun fn -> fn t) t.resume_fns
-    >>= fun () ->
-    Lwt_mutex.with_lock t.l
-        (fun () -> Lwt_condition.broadcast t.c (); return ())
-    >>= fun () ->
-    Lwt_ring.Front.shutdown old_transport.rx_client;
-    Lwt_ring.Front.shutdown old_transport.tx_client;
-    return ()
-
-  let resume () =
-    let devs = Hashtbl.fold (fun k v acc -> (k,v)::acc) devices [] in
-    Lwt_list.iter_p (fun (k,v) -> resume (k,v)) devs
-
   (* The Xenstore MAC address is colon separated, very helpfully *)
   let mac nf = nf.t.mac
   let mtu nf = nf.t.mtu
@@ -412,8 +393,4 @@ module Make(C: S.CONFIGURATION) = struct
   let get_stats_counters t = t.t.stats
 
   let reset_stats_counters t = Stats.reset t.t.stats
-
-  let () =
-    Log.info (fun f -> f "add resume hook");
-    OS.Sched.add_resume_hook resume
 end

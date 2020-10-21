@@ -11,7 +11,7 @@ build: [
 ]
 
 depends: [
-  "ocaml" {>= "4.06.0"}
+  "ocaml" {>= "4.08.0"}
   "dune"  {>= "1.0"}
   "cstruct" {>= "3.0.0"}
   "ppx_sexp_conv"
@@ -19,8 +19,7 @@ depends: [
   "lwt" {>= "2.4.3"}
   "mirage-net" {>= "3.0.0"}
   "io-page" {>= "1.5.0"}
-  "io-page-xen" {>= "2.0.0"}
-  "mirage-xen" {>= "5.0.0"}
+  "mirage-xen" {>= "6.0.0"}
   "ipaddr" {>= "3.0.0"}
   "mirage-profile" {>="0.3"}
   "shared-memory-ring" {>="3.0.0"}
