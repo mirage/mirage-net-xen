@@ -29,7 +29,7 @@ let allocate_ring ~domid =
   let x = Io_page.to_cstruct page in
   Export.get ()
   >>= fun gnt ->
-  for i = 0 to Cstruct.len x - 1 do
+  for i = 0 to Cstruct.length x - 1 do
     Cstruct.set_uint8 x i 0
   done;
   Export.grant_access ~domid ~writable:true gnt page;
@@ -203,9 +203,9 @@ module Make(C: S.CONFIGURATION) = struct
             Cstruct.blit buf offset data !next size;
             next := !next + size
           ) >|= fun () ->
-          assert (!next = Cstruct.len data);
+          assert (!next = Cstruct.length data);
           Lwt.async (fun () ->
-            Stats.rx nf.stats (Int64.of_int (Cstruct.len data));
+            Stats.rx nf.stats (Int64.of_int (Cstruct.length data));
             Lwt.catch (fun () -> fn data)
               (function
                 | Out_of_memory -> Lwt.fail Out_of_memory

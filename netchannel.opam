@@ -13,7 +13,7 @@ build: [
 depends: [
   "ocaml" {>= "4.08.0"}
   "dune"  {>= "1.0"}
-  "cstruct" {>= "3.0.0"}
+  "cstruct" {>= "6.0.0"}
   "ppx_sexp_conv"
   "ppx_cstruct"
   "lwt" {>= "2.4.3"}
@@ -25,7 +25,8 @@ depends: [
   "shared-memory-ring" {>="3.0.0"}
   "sexplib" {>= "113.01.00"}
   "logs" {>= "0.5.0"}
-  "rresult"
+  "lwt-dllist"
+  "macaddr" {>= "5.2.0"}
 ]
 tags: "org:mirage"
 synopsis: "Network device for reading and writing Ethernet frames via then Xen netfront/netback protocol"

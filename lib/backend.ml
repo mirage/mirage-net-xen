@@ -183,8 +183,8 @@ module Make(C: S.CONFIGURATION) = struct
               | Error (`Msg m) -> failwith m   (* Couldn't map client's grant; give up *)
               | Ok () -> ()
             ) >|= fun () ->
-            assert (!next = Cstruct.len data);
-            Stats.rx t.stats (Int64.of_int (Cstruct.len data));
+            assert (!next = Cstruct.length data);
+            Stats.rx t.stats (Int64.of_int (Cstruct.length data));
             Lwt.async (fun () ->
               Lwt.catch (fun () -> fn data)
                 (function

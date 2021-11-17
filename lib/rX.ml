@@ -67,11 +67,10 @@ module Response = struct
     else Ok x
 
   let read slot =
-    let open Rresult.R.Infix in
+    let ( let* ) = Result.bind in
     let id = get_resp_id slot in
     let offset = get_resp_offset slot in
-    within_page "RX.Response.offset" offset
-    >>= fun offset ->
+    let* offset = within_page "RX.Response.offset" offset in
     let flags = Flags.of_int (get_resp_flags slot) in
     let size =
       match get_resp_status slot with
