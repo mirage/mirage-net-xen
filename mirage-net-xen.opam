@@ -31,4 +31,7 @@ write Ethernet frames via the [Netfront/netback][xen-net] protocol.
 """
 pin-depends:[
   [ "mirage-xen.dev" "git+https://github.com/dinosaure/mirage-xen.git#b7b5eaebead17a864b53085b60351a1648ba05b1" ]
+  [ "mirage-runtime.4.0.0" "git+https://github.com/mirage/mirage.git#59101cd795e741982a0a4580c113072339e1389b" ]
+  [ "functoria-runtime.4.0.0" "git+https://github.com/mirage/mirage.git#59101cd795e741982a0a4580c113072339e1389b" ]
+  [ "functoria.4.0.0" "git+https://github.com/mirage/mirage.git#59101cd795e741982a0a4580c113072339e1389b" ]
 ]
