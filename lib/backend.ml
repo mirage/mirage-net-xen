@@ -19,8 +19,8 @@
 open Lwt.Infix
 open Mirage_net
 
-module Gntref = OS.Xen.Gntref
-module Import = OS.Xen.Import
+module Gntref = Xen_os.Xen.Gntref
+module Import = Xen_os.Xen.Import
 
 let src = Logs.Src.create "net-xen backend" ~doc:"Mirage's Xen netback"
 module Log = (val Logs.src_log src : Logs.LOG)
@@ -62,7 +62,7 @@ module Make(C: S.CONFIGURATION) = struct
   let pp_error = Mirage_net.Net.pp_error
 
   type t = {
-    channel: OS.Eventchn.t;
+    channel: Xen_os.Eventchn.t;
     frontend_id: int;
     mac: Macaddr.t;
     frontend_mac: Macaddr.t;
@@ -76,7 +76,7 @@ module Make(C: S.CONFIGURATION) = struct
     get_free_mutex: Lwt_mutex.t;
   }
 
-  let h = OS.Eventchn.init ()
+  let h = Xen_os.Eventchn.init ()
 
   let create ~switch ~domid ~device_id =
     let id = `Server (domid, device_id) in
@@ -88,8 +88,8 @@ module Make(C: S.CONFIGURATION) = struct
     C.init_backend id Features.supported >>= fun backend_configuration ->
     let frontend_id = backend_configuration.S.frontend_id in
     C.read_frontend_configuration id >>= fun f ->
-    let channel = OS.Eventchn.bind_interdomain h frontend_id (int_of_string f.S.event_channel) in
-    Cleanup.push cleanup (fun () -> OS.Eventchn.unbind h channel; return ());
+    let channel = Xen_os.Eventchn.bind_interdomain h frontend_id (int_of_string f.S.event_channel) in
+    Cleanup.push cleanup (fun () -> Xen_os.Eventchn.unbind h channel; return ());
     (* Note: TX and RX are from netfront's point of view (e.g. we receive on TX). *)
     let from_netfront =
       let tx_gnt = {Import.domid = frontend_id; ref = Gntref.of_int32 f.S.tx_ring_ref} in
@@ -109,7 +109,7 @@ module Make(C: S.CONFIGURATION) = struct
       Ring.Rpc.Back.init ~sring in
     let stats = Stats.create () in
     let rx_reqs = Lwt_dllist.create () in
-    OS.Eventchn.unmask h channel;
+    Xen_os.Eventchn.unmask h channel;
     C.connect id >>= fun () ->
     let write_mutex = Lwt_mutex.create () in
     let get_free_mutex = Lwt_mutex.create () in
@@ -198,11 +198,11 @@ module Make(C: S.CONFIGURATION) = struct
       )
       >>= fun () ->
       let notify = Ring.Rpc.Back.push_responses_and_check_notify (from_netfront ()) in
-      if notify then OS.Eventchn.notify h t.channel;
-      OS.Activations.after t.channel after
+      if notify then Xen_os.Eventchn.notify h t.channel;
+      Xen_os.Activations.after t.channel after
       >>= loop in
     Lwt.catch
-      (fun () -> loop OS.Activations.program_start >|= fun `Never_returns -> assert false)
+      (fun () -> loop Xen_os.Activations.program_start >|= fun `Never_returns -> assert false)
       (function
         | Netback_shutdown -> Lwt.return (Ok ())
         | ex -> Lwt.fail ex
@@ -232,13 +232,13 @@ module Make(C: S.CONFIGURATION) = struct
           );
         if Lwt_dllist.length t.rx_reqs <> n'
         then loop after
-        else OS.Activations.after t.channel after >>= loop
+        else Xen_os.Activations.after t.channel after >>= loop
       end in
     (* We lock here so that we handle one frame at a time.
        Otherwise, we might divide the free pages among lots of
        waiters and deadlock. *)
     Lwt_mutex.with_lock t.get_free_mutex (fun () ->
-      loop OS.Activations.program_start
+      loop Xen_os.Activations.program_start
     )
 
   let write t ~size fillf =
@@ -294,7 +294,7 @@ module Make(C: S.CONFIGURATION) = struct
                return ()
            ) >|= fun () -> Ok (
            if Ring.Rpc.Back.push_responses_and_check_notify (to_netfront t)
-           then OS.Eventchn.notify h t.channel)
+           then Xen_os.Eventchn.notify h t.channel)
       )
       (function
         | Netback_shutdown -> Lwt.return (Error `Disconnected)

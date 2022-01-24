@@ -16,8 +16,8 @@
 
 open Lwt.Infix
 
-module Gntref = OS.Xen.Gntref
-module Export = OS.Xen.Export
+module Gntref = Xen_os.Xen.Gntref
+module Export = Xen_os.Xen.Export
 
 let src = Logs.Src.create "net-xen frontend" ~doc:"Mirage's Xen netfront"
 module Log = (val Logs.src_log src : Logs.LOG)
@@ -74,7 +74,7 @@ module Make(C: S.CONFIGURATION) = struct
     rx_gnt: Gntref.t;
     mutable rx_id: Cstruct.uint16;
 
-    evtchn: OS.Eventchn.t;
+    evtchn: Xen_os.Eventchn.t;
     features: Features.t;
     stats : Mirage_net.stats;
   }
@@ -85,7 +85,7 @@ module Make(C: S.CONFIGURATION) = struct
     c : unit Lwt_condition.t;
   }
 
-  let h = OS.Eventchn.init ()
+  let h = Xen_os.Eventchn.init ()
 
   (* Given a VIF ID, construct a netfront record for it *)
   let plug_inner vif_id =
@@ -105,8 +105,8 @@ module Make(C: S.CONFIGURATION) = struct
     create_tx (vif_id, backend_id)
     >>= fun (tx_gnt, _tx_fring, tx_client) ->
     let tx_mutex = Lwt_mutex.create () in
-    let evtchn = OS.Eventchn.bind_unbound_port h backend_id in
-    let evtchn_port = OS.Eventchn.to_int evtchn in
+    let evtchn = Xen_os.Eventchn.bind_unbound_port h backend_id in
+    let evtchn_port = Xen_os.Eventchn.to_int evtchn in
     (* Write Xenstore info and set state to Connected *)
     let front_conf = { S.
       tx_ring_ref = Gntref.to_int32 tx_gnt;
@@ -126,7 +126,7 @@ module Make(C: S.CONFIGURATION) = struct
     (* Wait for backend to accept connection *)
     let rx_map = Hashtbl.create 1 in
     C.wait_until_backend_connected backend_conf >>= fun () ->
-    OS.Eventchn.unmask h evtchn;
+    Xen_os.Eventchn.unmask h evtchn;
     let stats = Stats.create () in
     let grant_tx_page = Export.grant_access ~domid:backend_id ~writable:false in
     let tx_pool = Shared_page_pool.make grant_tx_page in
@@ -142,7 +142,7 @@ module Make(C: S.CONFIGURATION) = struct
   let devices : (int, t) Hashtbl.t = Hashtbl.create 1
 
   let notify nf () =
-    OS.Eventchn.notify h nf.evtchn
+    Xen_os.Eventchn.notify h nf.evtchn
 
   let refill_requests nf =
     let num = Ring.Rpc.Front.get_free_requests nf.rx_fring in
@@ -230,10 +230,10 @@ module Make(C: S.CONFIGURATION) = struct
       rx_poll nf.t receive_callback >>= fun () ->
       refill_requests nf.t >>= fun () ->
       tx_poll nf.t;
-      OS.Activations.after nf.t.evtchn from >>= fun from ->
+      Xen_os.Activations.after nf.t.evtchn from >>= fun from ->
       loop from
     in
-    loop OS.Activations.program_start
+    loop Xen_os.Activations.program_start
 
   let connect id =
     (* If [id] is an integer, use it. Otherwise, return an error message
