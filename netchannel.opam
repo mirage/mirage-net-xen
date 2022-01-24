@@ -37,3 +37,6 @@ write Ethernet frames via the [Netfront/netback][xen-net] protocol.
 Note: the `Netif` module is the public API.
 The `Netchannel` API is still under development.
 """
+pin-depends: [
+  [ "mirage-xen.dev" "git+https://github.com/dinosaure/mirage-xen.git#b7b5eaebead17a864b53085b60351a1648ba05b1" ]
+]
