@@ -16,8 +16,8 @@
 
 open Lwt.Infix
 
-module Gntref = OS.Xen.Gntref
-module Export = OS.Xen.Export
+module Gntref = Xen_os.Xen.Gntref
+module Export = Xen_os.Xen.Export
 
 let return = Lwt.return
 

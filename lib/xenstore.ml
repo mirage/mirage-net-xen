@@ -79,7 +79,7 @@ module Make(Xs: Xs_client_lwt.S) = struct
 
   (* Curiously, libxl writes the frontend MAC to both the frontend and
      backend directories. The convention seems to be to use this as the
-     backend MAC. See: https://github.com/QubesOS/qubes-issues/issues/5013 *)
+     backend MAC. See: https://github.com/QubesXen_os/qubes-issues/issues/5013 *)
   let backend_mac = Macaddr.of_string_exn "fe:ff:ff:ff:ff:ff"
   let read_backend_mac _ = return backend_mac
 
@@ -158,7 +158,7 @@ module Make(Xs: Xs_client_lwt.S) = struct
         (fun () ->
           Xs.read h (frontend / "state")
           >>= fun state ->
-          let open OS.Device_state in
+          let open Xen_os.Device_state in
           match of_string state with
           | Initialised | Connected -> return ()
           | Unknown
@@ -196,7 +196,7 @@ module Make(Xs: Xs_client_lwt.S) = struct
       Lwt.catch
         (fun () ->
           Xs.read h (conf.backend / "state") >>= fun state ->
-          let open OS.Device_state in
+          let open Xen_os.Device_state in
           match of_string state with
           | Connected -> return ()
           | Initialised
@@ -222,7 +222,7 @@ module Make(Xs: Xs_client_lwt.S) = struct
         | `Client _ -> frontend id
         | `Server (_, _) -> backend id )
       >>= fun path ->
-      write h (path / "state") OS.Device_state.(to_string Connected)
+      write h (path / "state") Xen_os.Device_state.(to_string Connected)
     ))
 
   let init_backend id features =
@@ -233,7 +233,7 @@ module Make(Xs: Xs_client_lwt.S) = struct
     Xs.(transaction xsc (fun h ->
       write_features h backend `Server features
       >>= fun () ->
-      write h (backend / "state") OS.Device_state.(to_string InitWait)
+      write h (backend / "state") Xen_os.Device_state.(to_string InitWait)
     ))
     >>= fun () ->
     Xs.(immediate xsc (fun h ->
@@ -296,8 +296,8 @@ module Make(Xs: Xs_client_lwt.S) = struct
              Xs.read h (path / "state")
           )
           (fun state ->
-             match OS.Device_state.of_string state with
-             | OS.Device_state.Closing | Closed -> return ()
+             match Xen_os.Device_state.of_string state with
+             | Xen_os.Device_state.Closing | Closed -> return ()
              | _ -> Lwt.fail Xs_protocol.Eagain
           )
           (fun ex ->
@@ -315,7 +315,7 @@ module Make(Xs: Xs_client_lwt.S) = struct
     frontend id
     >>= fun path ->
     Xs.(immediate xsc (fun h ->
-      write h (path / "state") OS.Device_state.(to_string Closed)
+      write h (path / "state") Xen_os.Device_state.(to_string Closed)
     ))
 
   (* See: https://github.com/mirage/xen/commit/546678c6a60f64fb186640460dfa69a837c8fba5 *)
