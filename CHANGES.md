@@ -1,3 +1,8 @@
+## v2.1.0 (2022-02-01)
+* Lint OPAM file (@hannesm, #100)
+* Update the project with `cstruct.6.0.0` (@hannesm, #100)
+* Rename `OS` by `Xen_os` (@dinosaure, #101)
+
 ## v2.0.0 (2020-10-21)
 * Adapt to mirage-xen 6.0.0 API changes (Solo5 based Xen PVH, #99 @mato)
 
