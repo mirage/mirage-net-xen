@@ -1,12 +1,13 @@
 opam-version: "2.0"
 maintainer:    "anil@recoil.org"
 authors:       ["Anil Madhavapeddy" "Thomas Leonard"]
+license:       "ISC"
 homepage:      "https://github.com/mirage/mirage-net-xen"
 bug-reports:   "https://github.com/mirage/mirage-net-xen/issues"
 dev-repo:      "git+https://github.com/mirage/mirage-net-xen.git"
 doc:           "https://mirage.github.io/mirage-net-xen/"
 build: [
-  [ "dune" "subst"] {pinned}
+  [ "dune" "subst"] {dev}
   [ "dune" "build" "-p" name "-j" jobs ]
 ]
 
@@ -19,13 +20,14 @@ depends: [
   "lwt" {>= "2.4.3"}
   "mirage-net" {>= "3.0.0"}
   "io-page" {>= "1.5.0"}
-  "mirage-xen" {>= "6.0.0"}
+  "mirage-xen" {>= "7.0.0"}
   "ipaddr" {>= "3.0.0"}
   "mirage-profile" {>="0.3"}
   "shared-memory-ring" {>="3.0.0"}
   "sexplib" {>= "113.01.00"}
   "logs" {>= "0.5.0"}
   "lwt-dllist"
+  "result" {>= "1.5"}
   "macaddr" {>= "5.2.0"}
 ]
 tags: "org:mirage"
@@ -37,9 +39,3 @@ write Ethernet frames via the [Netfront/netback][xen-net] protocol.
 Note: the `Netif` module is the public API.
 The `Netchannel` API is still under development.
 """
-pin-depends: [
-  [ "mirage-xen.dev" "git+https://github.com/dinosaure/mirage-xen.git#b7b5eaebead17a864b53085b60351a1648ba05b1" ]
-  [ "mirage-runtime.4.0.0" "git+https://github.com/mirage/mirage.git#59101cd795e741982a0a4580c113072339e1389b" ]
-  [ "functoria-runtime.4.0.0" "git+https://github.com/mirage/mirage.git#59101cd795e741982a0a4580c113072339e1389b" ]
-  [ "functoria.4.0.0" "git+https://github.com/mirage/mirage.git#59101cd795e741982a0a4580c113072339e1389b" ]
-]
