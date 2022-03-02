@@ -206,15 +206,7 @@ module Make(C: S.CONFIGURATION) = struct
           assert (!next = Cstruct.length data);
           Lwt.async (fun () ->
             Stats.rx nf.stats (Int64.of_int (Cstruct.length data));
-            Lwt.catch (fun () -> fn data)
-              (function
-                | Out_of_memory -> Lwt.fail Out_of_memory
-                | ex ->
-                  Log.err (fun f -> f "uncaught exception from listen callback while handling frame:@\n@[<v2>  %a@]@\nException: @[%s@]"
-                              Cstruct.hexdump_pp data (Printexc.to_string ex));
-                  Lwt.return ()
-              )
-          )
+            fn data)
     )
 
   let tx_poll nf =
