@@ -1,3 +1,6 @@
+## v2.1.1 (2022-03-14)
+* Do not `Lwt.catch` on the listen callback (@hannesm, @dinosaure, #103)
+
 ## v2.1.0 (2022-02-01)
 * Lint OPAM file (@hannesm, #100)
 * Update the project with `cstruct.6.0.0` (@hannesm, #100)
