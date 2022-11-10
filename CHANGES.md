@@ -1,3 +1,7 @@
+## v2.1.2 (2022-11-10)
+* netback: go to closed state before removing vif from xenstore (@palainp,
+  #105, addresses mirage/qubes-mirage-firewall#157)
+
 ## v2.1.1 (2022-03-14)
 * Do not `Lwt.catch` on the listen callback (@hannesm, @dinosaure, #103)
 
