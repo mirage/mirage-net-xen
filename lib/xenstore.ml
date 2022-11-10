@@ -325,6 +325,8 @@ module Make(Xs: Xs_client_lwt.S) = struct
     backend id
     >>= fun path ->
     Lwt.catch (fun () ->
+        Xs.(immediate xsc (fun h -> write h (path / "state") Xen_os.Device_state.(to_string Closed))) >>= fun _ ->
+        wait_for_frontend_closing id >>= fun () ->
         Xs.(immediate xsc (fun h -> rm h path))
       )
       (fun ex ->
