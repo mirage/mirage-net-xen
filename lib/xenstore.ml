@@ -252,6 +252,21 @@ module Make(Xs: Xs_client_lwt.S) = struct
     ))
 
   let read_backend id =
+    let wait_or_read xsc h path =
+       Xs.wait xsc (fun h ->
+         Lwt.catch
+           (fun () ->
+             Xs.read h path
+           )
+           (function
+             | Xs_protocol.Enoent _
+             | Xs_protocol.Invalid _
+             | Xs_protocol.Eagain _ -> fail Xs_protocol.Eagain
+             | Xs_protocol.Eexist -> fail Xs_protocol.Eexist
+             | ex -> fail ex
+           )
+       )
+    in
     frontend id
     >>= fun frontend ->
     Xs.make ()
@@ -262,7 +277,7 @@ module Make(Xs: Xs_client_lwt.S) = struct
       | `Server (frontend_id, _) -> return frontend_id
       end
       >>= fun frontend_id ->
-      read h (frontend / "backend-id")
+      wait_or_read xsc h (frontend / "backend-id")
       >>= fun backend_id ->
       read_int backend_id
       >>= fun backend_id ->
