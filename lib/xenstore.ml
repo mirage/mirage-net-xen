@@ -251,37 +251,39 @@ module Make(Xs: Xs_client_lwt.S) = struct
       return { frontend_id; backend; backend_id; features_available = features }
     ))
 
+
   let read_backend id =
-    let wait_or_read xsc h path =
-       Xs.wait xsc (fun h ->
-         Lwt.catch
-           (fun () ->
-             Xs.read h path
-           )
-           (function
-             | Xs_protocol.Enoent _
-             | Xs_protocol.Invalid _
-             | Xs_protocol.Eagain _ -> fail Xs_protocol.Eagain
-             | Xs_protocol.Eexist -> fail Xs_protocol.Eexist
-             | ex -> fail ex
-           )
-       )
-    in
     frontend id
     >>= fun frontend ->
     Xs.make ()
     >>= fun xsc ->
     Xs.(immediate xsc (fun h ->
+      (* [safe_read] waits for the path to exists before reading it *)
+      let safe_read path =
+         Xs.wait xsc (fun h ->
+           Lwt.catch
+             (fun () ->
+               Xs.read h path
+             )
+             (function
+               | Xs_protocol.Enoent _
+               | Xs_protocol.Invalid
+               | Xs_protocol.Eagain -> fail Xs_protocol.Eagain
+               | Xs_protocol.Eexist -> fail Xs_protocol.Eexist
+               | ex -> fail ex
+             )
+         )
+      in
       begin match id with
       | `Client _ -> read h "domid" >>= read_int
       | `Server (frontend_id, _) -> return frontend_id
       end
       >>= fun frontend_id ->
-      wait_or_read xsc h (frontend / "backend-id")
+      safe_read (frontend / "backend-id")
       >>= fun backend_id ->
       read_int backend_id
       >>= fun backend_id ->
-      read h (frontend / "backend")
+      safe_read (frontend / "backend")
       >>= fun backend ->
       read_features `Server backend
       >>= fun features_available ->
