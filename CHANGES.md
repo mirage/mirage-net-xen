@@ -1,3 +1,7 @@
+## v2.1.3 (2023-07-22)
+* xenstore: read_backend now waits for the backend-id key to be written by
+  Xen before reading it to avoid raising an exception (@palainp, #107)
+
 ## v2.1.2 (2022-11-10)
 * netback: go to closed state before removing vif from xenstore (@palainp,
   #105, addresses mirage/qubes-mirage-firewall#157)
