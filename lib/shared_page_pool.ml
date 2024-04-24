@@ -85,7 +85,6 @@ let rec use t fn =
     failwith "Shared_page_pool.use after shutdown";
   match t.blocks with
   | [] when t.next_id >= max_pages ->
-      MProf.Trace.label "Shared_page_pool waiting for free";
       Lwt_condition.wait t.avail >>= fun () -> use t fn
   | [] ->
       (* Frames normally fit within 2048 bytes, so we split each page in half. *)

@@ -177,7 +177,6 @@ module Make(C: S.CONFIGURATION) = struct
 
   let rx_poll nf fn =
     let module Recv = Assemble.Make(RX.Response) in
-    MProf.Trace.label "Netchannel.Frontend.rx_poll";
     let q = ref [] in
     Ring.Rpc.Front.ack_responses nf.rx_fring (fun slot ->
       match RX.Response.read slot with
@@ -210,14 +209,12 @@ module Make(C: S.CONFIGURATION) = struct
     )
 
   let tx_poll nf =
-    MProf.Trace.label "Netif.tx_poll";
     Lwt_ring.Front.poll nf.tx_client (fun slot ->
       let resp = TX.Response.read slot in
       (resp.TX.Response.id, resp)
     )
 
   let listen nf ~header_size:_ receive_callback =
-    MProf.Trace.label "Netchannel.Frontend.listen";
     let rec loop from =
       rx_poll nf.t receive_callback >>= fun () ->
       refill_requests nf.t >>= fun () ->
