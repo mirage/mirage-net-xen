@@ -14,9 +14,8 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
-open Sexplib.Std
 
-type t = int [@@deriving sexp]
+type t = int
 
 let empty          = 0
 
@@ -30,5 +29,4 @@ let to_int x = x
 
 let (++) = (lor)
 let (--) a b = a land (lnot b)
-let mem a b = 
-  (a land b) = a
+let mem a b = (a land b) = a
