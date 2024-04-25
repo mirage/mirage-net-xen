@@ -73,10 +73,10 @@ end
 
 module Response = struct
   type status =
-    | DROPPED [@id 0xfffe]
-    | ERROR   [@id 0xffff]
-    | OKAY    [@id 0]
-    | NULL    [@id 1]
+    | DROPPED
+    | ERROR
+    | OKAY
+    | NULL
 
   let status_to_int = function
     | DROPPED -> 0xfffe
