@@ -14,23 +14,18 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
-open Sexplib.Std
-
-[@@@ocaml.warning "-32"]  (* cstruct ppx generates unused values *)
 
 module Request = struct
   type t = {
     id: int;
     gref: int32;
-  } [@@deriving sexp]
+  }
 
-  [%%cstruct
-  type req = {
-    id: uint16_t;
-    _padding: uint16_t;
-    gref: uint32_t;
-  } [@@little_endian]
-  ]
+  let get_req_id c = Cstruct.LE.get_uint16 c 0
+  let set_req_id c id = Cstruct.LE.set_uint16 c 0 id
+  let get_req_gref c = Cstruct.LE.get_uint32 c 4
+  let set_req_gref c gref = Cstruct.LE.set_uint32 c 4 gref
+  let sizeof_req = 8
 
   let write t slot =
     set_req_id slot t.id;
@@ -52,14 +47,15 @@ module Response = struct
     size: (int, error) result;
   }
 
-  [%%cstruct
-  type resp = {
-    id: uint16_t;
-    offset: uint16_t;
-    flags: uint16_t;
-    status: uint16_t;  (* Negative => Err, else Size *)
-  } [@@little_endian]
-  ]
+  let get_resp_id c = Cstruct.LE.get_uint16 c 0
+  let set_resp_id c id = Cstruct.LE.set_uint16 c 0 id
+  let get_resp_offset c = Cstruct.LE.get_uint16 c 2
+  let set_resp_offset c off = Cstruct.LE.set_uint16 c 2 off
+  let get_resp_flags c = Cstruct.LE.get_uint16 c 4
+  let set_resp_flags c fl = Cstruct.LE.set_uint16 c 4 fl
+  let get_resp_status c = Cstruct.LE.get_uint16 c 6
+  let set_resp_status c s = Cstruct.LE.set_uint16 c 6 s
+  let sizeof_resp = 8
 
   let within_page name x =
     if x < 0 || x > 4096

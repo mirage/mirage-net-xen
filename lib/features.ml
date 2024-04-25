@@ -13,7 +13,6 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
-open Sexplib.Std
 
 type t = {
   rx_copy: bool;
@@ -22,7 +21,7 @@ type t = {
   sg: bool;
   gso_tcpv4: bool;
   smart_poll: bool;
-} [@@deriving sexp]
+}
 
 let supported = {
   rx_copy = true;

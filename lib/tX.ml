@@ -15,8 +15,6 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-[@@@ocaml.warning "-32"]  (* cstruct ppx generates unused values *)
-
 module Request = struct
   type error = { impossible : 'a. 'a }
 
@@ -26,22 +24,24 @@ module Request = struct
     flags: Flags.t;
     id: int;
 
-    (** For frames split over multiple requests, first.size is the total
-        size of the frame. Each of the following requests gives the size
-        of that fragment. The receiver recovers the actual size of the
-        first fragment by subtracting all of the other sizes. *)
+    (* For frames split over multiple requests, first.size is the total
+       size of the frame. Each of the following requests gives the size
+       of that fragment. The receiver recovers the actual size of the
+       first fragment by subtracting all of the other sizes. *)
     size: int;
   }
 
-  [%%cstruct
-  type req = {
-    gref: uint32_t;
-    offset: uint16_t;
-    flags: uint16_t;
-    id: uint16_t;
-    size: uint16_t;
-  } [@@little_endian]
-  ]
+  let get_req_gref c = Cstruct.LE.get_uint32 c 0
+  let set_req_gref c gref = Cstruct.LE.set_uint32 c 0 gref
+  let get_req_offset c = Cstruct.LE.get_uint16 c 4
+  let set_req_offset c off = Cstruct.LE.set_uint16 c 4 off
+  let get_req_flags c = Cstruct.LE.get_uint16 c 6
+  let set_req_flags c flags = Cstruct.LE.set_uint16 c 6 flags
+  let get_req_id c = Cstruct.LE.get_uint16 c 8
+  let set_req_id c id = Cstruct.LE.set_uint16 c 6 id
+  let get_req_size c = Cstruct.LE.get_uint16 c 8
+  let set_req_size c size = Cstruct.LE.set_uint16 c 8 size
+  let sizeof_req = 10
 
   let write t slot =
     let flags = Flags.to_int t.flags in
@@ -72,25 +72,36 @@ module Request = struct
 end
 
 module Response = struct
-  [%%cenum
   type status =
-    | DROPPED [@id 0xfffe]
-    | ERROR   [@id 0xffff]
-    | OKAY    [@id 0]
-    | NULL    [@id 1]
-    [@@int16_t]
-  ]
+    | DROPPED
+    | ERROR
+    | OKAY
+    | NULL
+
+  let status_to_int = function
+    | DROPPED -> 0xfffe
+    | ERROR -> 0xffff
+    | OKAY -> 0
+    | NULL -> 1
+
+  let int_to_status = function
+    | 0xfffe -> Some DROPPED
+    | 0xffff -> Some ERROR
+    | 0 -> Some OKAY
+    | 1 -> Some NULL
+    | _ -> None
+
   type t = {
     id: int;
     status: status;
   }
 
-  [%%cstruct
-  type resp = {
-    id: uint16_t;
-    status: uint16_t;
-  } [@@little_endian]
-  ]
+  let get_resp_id c = Cstruct.LE.get_uint16 c 0
+  let set_resp_id c id = Cstruct.LE.set_uint16 c 0 id
+  let get_resp_status c = Cstruct.LE.get_uint16 c 2
+  let set_resp_status c status = Cstruct.LE.set_uint16 c 2 status
+  let sizeof_resp = 4
+
   let write t slot =
     set_resp_id slot t.id;
     set_resp_status slot (status_to_int t.status)

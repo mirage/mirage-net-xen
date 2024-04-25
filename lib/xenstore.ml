@@ -74,7 +74,7 @@ module Make(Xs: Xs_client_lwt.S) = struct
     | Error (`Msg msg) ->
       let m = Macaddr.make_local (fun _ -> Random.int 255) in
       Log.info (fun f -> f "%s: no configured MAC (error: %s), using %a"
-        (Sexplib.Sexp.to_string (S.sexp_of_id id)) msg Macaddr.pp m);
+        (id_to_string id) msg Macaddr.pp m);
       return m
 
   (* Curiously, libxl writes the frontend MAC to both the frontend and
