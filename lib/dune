@@ -1,6 +1,7 @@
 (library
- (name netchannel)
- (public_name netchannel)
+ (name mirage_net_xen)
+ (public_name mirage-net-xen)
  (modules Frontend Backend Xenstore S Stats Flags RX TX Features
-   Shared_page_pool Assemble)
+   Shared_page_pool Assemble Netif)
+ (wrapped false)
  (libraries cstruct macaddr mirage-xen lwt-dllist logs mirage-net io-page))
