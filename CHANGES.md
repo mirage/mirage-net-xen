@@ -1,3 +1,8 @@
+## v2.1.4 (2024-04-29)
+* Remove mirage-profile dependency (#109 @hannesm)
+* Remove sexplib, ppx_sexp_conv and ppx_cstruct dependency (#110 @hannesm)
+* Merge netchannel and mirage-net-xen into single opam pacakge (#111 @hannesm)
+
 ## v2.1.3 (2023-07-22)
 * xenstore: read_backend now waits for the backend-id key to be written by
   Xen before reading it to avoid raising an exception (@palainp, #107)
