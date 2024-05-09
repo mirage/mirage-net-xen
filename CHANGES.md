@@ -1,3 +1,8 @@
+## v2.1.5 (2024-05-09)
+* Fix TX.Request structure decoding and encoding (introduced in 2.1.4, #110 --
+  fixed by @palainp #112) -- due to this bug, 2.1.4 is marked as unavailable
+  in opam-repository
+
 ## v2.1.4 (2024-04-29)
 * Remove mirage-profile dependency (#109 @hannesm)
 * Remove sexplib, ppx_sexp_conv and ppx_cstruct dependency (#110 @hannesm)
