@@ -38,10 +38,10 @@ module Request = struct
   let get_req_flags c = Cstruct.LE.get_uint16 c 6
   let set_req_flags c flags = Cstruct.LE.set_uint16 c 6 flags
   let get_req_id c = Cstruct.LE.get_uint16 c 8
-  let set_req_id c id = Cstruct.LE.set_uint16 c 6 id
-  let get_req_size c = Cstruct.LE.get_uint16 c 8
-  let set_req_size c size = Cstruct.LE.set_uint16 c 8 size
-  let sizeof_req = 10
+  let set_req_id c id = Cstruct.LE.set_uint16 c 8 id
+  let get_req_size c = Cstruct.LE.get_uint16 c 10
+  let set_req_size c size = Cstruct.LE.set_uint16 c 10 size
+  let sizeof_req = 12
 
   let write t slot =
     let flags = Flags.to_int t.flags in
