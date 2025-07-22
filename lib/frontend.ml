@@ -136,7 +136,8 @@ module Make(C: S.CONFIGURATION) = struct
     C.read_mtu id >>= fun mtu ->
     return { vif_id; backend_id; tx_client; tx_gnt; tx_mutex; tx_pool;
              rx_gnt; rx_fring; rx_client; rx_map; rx_id = 0 ; stats;
-             evtchn; mac; mtu; backend; features; free_pages = [];
+             evtchn; mac; mtu; backend; features;
+             free_pages = Io_page.pages 128; (* Pre-allocate 128*4kB=512kB of free_pages*)
            }
 
   (** Set of active block devices *)
@@ -205,7 +206,7 @@ module Make(C: S.CONFIGURATION) = struct
       | Error (e, msgs) ->
           Log.err (fun f -> f "received error: %d" e);
           msgs |> Lwt_list.iter_s (fun msg ->
-            pop_rx_page nf msg.RX.Response.id >>= fun (_ : Io_page.t) ->
+            pop_rx_page nf msg.RX.Response.id >>= fun (page : Io_page.t) ->
             nf.free_pages <- page::nf.free_pages ;
             Lwt.return_unit
           )
