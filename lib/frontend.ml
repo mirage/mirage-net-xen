@@ -73,6 +73,7 @@ module Make(C: S.CONFIGURATION) = struct
     rx_map: (int, Gntref.t * Io_page.t) Hashtbl.t;
     rx_gnt: Gntref.t;
     mutable rx_id: Cstruct.uint16;
+    mutable free_pages: Io_page.t list;
 
     evtchn: Xen_os.Eventchn.t;
     features: Features.t;
@@ -135,7 +136,7 @@ module Make(C: S.CONFIGURATION) = struct
     C.read_mtu id >>= fun mtu ->
     return { vif_id; backend_id; tx_client; tx_gnt; tx_mutex; tx_pool;
              rx_gnt; rx_fring; rx_client; rx_map; rx_id = 0 ; stats;
-             evtchn; mac; mtu; backend; features;
+             evtchn; mac; mtu; backend; features; free_pages = [];
            }
 
   (** Set of active block devices *)
@@ -144,12 +145,27 @@ module Make(C: S.CONFIGURATION) = struct
   let notify nf () =
     Xen_os.Eventchn.notify h nf.evtchn
 
+  let take_pages t n =
+    let rec inner t n acc =
+      if n==0 then acc
+      else (
+        match t.free_pages with
+        | hd::tl ->
+          t.free_pages <- tl;
+          inner t (n-1) (hd::acc)
+        | [] ->
+          let pages = Io_page.pages n in
+          List.append pages acc
+      )
+    in
+    inner t n []
+
   let refill_requests nf =
     let num = Ring.Rpc.Front.get_free_requests nf.rx_fring in
     if num > 0 then
       Export.get_n num
       >>= fun grefs ->
-      let pages = Io_page.pages num in
+      let pages = take_pages nf num in
       List.iter
         (fun (gref, page) ->
            let rec next () =
@@ -190,6 +206,7 @@ module Make(C: S.CONFIGURATION) = struct
           Log.err (fun f -> f "received error: %d" e);
           msgs |> Lwt_list.iter_s (fun msg ->
             pop_rx_page nf msg.RX.Response.id >>= fun (_ : Io_page.t) ->
+            nf.free_pages <- page::nf.free_pages ;
             Lwt.return_unit
           )
       | Ok frame ->
@@ -200,6 +217,7 @@ module Make(C: S.CONFIGURATION) = struct
             pop_rx_page nf id >|= fun page ->
             let buf = Io_page.to_cstruct page in
             Cstruct.blit buf offset data !next size;
+            nf.free_pages <- page::nf.free_pages ;
             next := !next + size
           ) >|= fun () ->
           assert (!next = Cstruct.length data);
