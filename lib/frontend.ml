@@ -155,7 +155,7 @@ module Make(C: S.CONFIGURATION) = struct
     (* returns the first n elements of l, and l without them, assumes than l is long enough *)
     let rec split_list l n acc = match n, l with
         | 0, _ -> acc, l
-        | n, [] -> assert false (* We assume l is long enough *)
+        | _n, [] -> assert false (* We assume l is long enough *)
         | n, hd::tl -> split_list tl (n-1) (hd::acc)
     in
     let fp, np, sa, ea = t.free_pages in
