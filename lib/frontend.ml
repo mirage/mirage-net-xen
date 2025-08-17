@@ -150,17 +150,13 @@ module Make(C: S.CONFIGURATION) = struct
     (* returns the first n elements of l, and l without them, assumes than l is long enough *)
     let rec split_list l n acc = match n, l with
         | 0, _ -> acc, l
-        | _n, [] -> assert false (* We assume l is long enough *)
+        | n, [] -> failwith (Printf.sprintf "Frontend wants %d pages, this is too much, fail." n) (* We assume l is long enough *)
         | n, hd::tl -> split_list tl (n-1) (hd::acc)
     in
     let fp = t.free_pages in
-    if (List.length fp) >= n then (
-      let pages, new_free_pages = split_list fp n [] in
-      t.free_pages <- new_free_pages ;
-      pages
-    ) else (
-        assert false
-    )
+    let pages, new_free_pages = split_list fp n [] in
+    t.free_pages <- new_free_pages ;
+    pages
 
   external unsafe_fill_bigstring : Io_page.t -> int -> int -> int -> unit = "caml_fill_bigstring" [@@noalloc]
 
