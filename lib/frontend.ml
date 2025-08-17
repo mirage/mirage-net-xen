@@ -73,7 +73,7 @@ module Make(C: S.CONFIGURATION) = struct
     rx_map: (int, Gntref.t * Io_page.t) Hashtbl.t;
     rx_gnt: Gntref.t;
     mutable rx_id: Cstruct.uint16;
-    mutable free_pages: Io_page.t list * int * int * int;
+    mutable free_pages: Io_page.t list;
 
     evtchn: Xen_os.Eventchn.t;
     features: Features.t;
@@ -134,15 +134,10 @@ module Make(C: S.CONFIGURATION) = struct
     (* Register callback activation *)
     let backend = backend_conf.S.backend in
     C.read_mtu id >>= fun mtu ->
-    let n_pages = 64 in (* Default size for pre-allocated free pages *)
-    let pages = Io_page.get n_pages in
-    let start_address = Nativeint.to_int (Io_page.get_addr pages) in
-    (* With this formula, the semantic is that page are within [start_address, end_address[ *)
-    let end_address = start_address + n_pages * Io_page.page_size in
     return { vif_id; backend_id; tx_client; tx_gnt; tx_mutex; tx_pool;
              rx_gnt; rx_fring; rx_client; rx_map; rx_id = 0 ; stats;
              evtchn; mac; mtu; backend; features;
-             free_pages = (Io_page.to_pages (Io_page.get n_pages), n_pages, start_address, end_address); (* Pre-allocate 64*4kB=256kB of free_pages*)
+             free_pages = Io_page.to_pages (Io_page.get 256); (* Allocate 256*4kB=1MB of free_pages*)
            }
 
   (** Set of active block devices *)
@@ -158,34 +153,20 @@ module Make(C: S.CONFIGURATION) = struct
         | _n, [] -> assert false (* We assume l is long enough *)
         | n, hd::tl -> split_list tl (n-1) (hd::acc)
     in
-    let fp, np, sa, ea = t.free_pages in
+    let fp = t.free_pages in
     if (List.length fp) >= n then (
       let pages, new_free_pages = split_list fp n [] in
-      t.free_pages <- (new_free_pages, np, sa, ea) ;
+      t.free_pages <- new_free_pages ;
       pages
     ) else (
-      (* if there is not enough pages, we need to allocate a new block and update starting and ending addresses *)
-      let n_pages = max n (np * 2) in (* Default strategy is to double the number of free_pages *)
-      let pages = Io_page.get n_pages in
-      let start_address = Nativeint.to_int (Io_page.get_addr pages) in
-      let end_address = start_address + n_pages * Io_page.page_size in
-
-      let pages, new_free_pages = split_list (Io_page.to_pages pages) n [] in
-      t.free_pages <- (new_free_pages, n_pages, start_address, end_address) ;
-      pages
+        assert false
     )
 
   external unsafe_fill_bigstring : Io_page.t -> int -> int -> int -> unit = "caml_fill_bigstring" [@@noalloc]
 
   let return_page t p =
-    let fp, np, sa, ea = t.free_pages in
-    let page_address = Nativeint.to_int (Io_page.get_addr p) in
-    (* If the page is in the current free_pages block, zero it, otherwise leave if for the finalizer *)
-    if (page_address >= sa && page_address < ea) then (
-      unsafe_fill_bigstring p 0 Io_page.page_size 0 ;
-      t.free_pages <- (p::fp, np, sa, ea) ;
-      ()
-    )
+    unsafe_fill_bigstring p 0 Io_page.page_size 0 ;
+    t.free_pages <- p::t.free_pages
 
   let refill_requests nf =
     let num = Ring.Rpc.Front.get_free_requests nf.rx_fring in
