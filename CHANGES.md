@@ -1,3 +1,7 @@
+## v2.1.6 (2025-08-18)
+* Pre-allocate 1MB for the RX ring in `connect`, and use and reuse these pages
+  (#114 @palainp)
+
 ## v2.1.5 (2024-05-09)
 * Fix TX.Request structure decoding and encoding (introduced in 2.1.4, #110 --
   fixed by @palainp #112) -- due to this bug, 2.1.4 is marked as unavailable
