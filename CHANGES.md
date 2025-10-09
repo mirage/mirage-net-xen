@@ -1,3 +1,7 @@
+## v2.1.7 (2025-10-09)
+* read MTU from xenstore instead of using a hardcoded 1500 (#115 @hannesm,
+  reviewed by @palainp)
+
 ## v2.1.6 (2025-08-18)
 * Pre-allocate 1MB for the RX ring in `connect`, and use and reuse these pages
   (#114 @palainp)
