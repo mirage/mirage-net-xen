@@ -1,5 +1,6 @@
 (*
  * Copyright (c) 2010-2013 Anil Madhavapeddy <anil@recoil.org>
+ * Copyright (c) 2026 Pierre Alain <pierre.alain@tuta.io>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -29,19 +30,17 @@ let allocate_ring ~domid =
   let x = Io_page.to_cstruct page in
   Export.get ()
   >>= fun gnt ->
-  for i = 0 to Cstruct.length x - 1 do
-    Cstruct.set_uint8 x i 0
-  done;
+  (* IO_page already returns a zeroed page, no need to write 0s *)
   Export.grant_access ~domid ~writable:true gnt page;
   return (gnt, x)
 
 let create_ring ~domid ~idx_size name =
   allocate_ring ~domid
-  >>= fun (rx_gnt, buf) ->
+  >>= fun (gnt, buf) ->
   let sring = Ring.Rpc.of_buf ~buf ~idx_size ~name in
   let fring = Ring.Rpc.Front.init ~sring in
   let client = Lwt_ring.Front.init string_of_int fring in
-  return (rx_gnt, fring, client)
+  return (gnt, fring, client)
 
 let create_rx (id, domid) =
   create_ring ~domid ~idx_size:RX.total_size (Printf.sprintf "Netif.RX.%d" id)
@@ -61,9 +60,10 @@ module Make(C: S.CONFIGURATION) = struct
 
     (* To transmit, we take half-pages from [Shared_page_pool], copy the data to them,
        and push the ref to the ring. *)
+    tx_fring: (TX.Response.t,int) Ring.Rpc.Front.t;
     tx_client: (TX.Response.t,int) Lwt_ring.Front.t;
     tx_gnt: Gntref.t;
-    tx_mutex: Lwt_mutex.t; (* Held to avoid signalling between fragments *)
+    tx_mutex: Lwt_mutex.t;
     tx_pool: Shared_page_pool.t;
 
     (* To receive, we share set of whole pages with the backend. We put the details of
@@ -88,10 +88,8 @@ module Make(C: S.CONFIGURATION) = struct
 
   let h = Xen_os.Eventchn.init ()
 
-  (* Given a VIF ID, construct a netfront record for it *)
   let plug_inner vif_id =
     let id = `Client vif_id in
-    (* Read details about the device *)
     C.read_backend id >>= fun backend_conf ->
     let backend_id = backend_conf.S.backend_id in
     Log.info (fun f -> f "create: id=%d domid=%d" vif_id backend_id);
@@ -104,23 +102,16 @@ module Make(C: S.CONFIGURATION) = struct
     create_rx (vif_id, backend_id)
     >>= fun (rx_gnt, rx_fring, rx_client) ->
     create_tx (vif_id, backend_id)
-    >>= fun (tx_gnt, _tx_fring, tx_client) ->
+    >>= fun (tx_gnt, tx_fring, tx_client) ->
     let tx_mutex = Lwt_mutex.create () in
-    let evtchn = Xen_os.Eventchn.bind_unbound_port h backend_id in
+    let evtchn = Netif_common.Eventchn.bind_unbound_port backend_id in
     let evtchn_port = Xen_os.Eventchn.to_int evtchn in
     (* Write Xenstore info and set state to Connected *)
     let front_conf = { S.
       tx_ring_ref = Gntref.to_int32 tx_gnt;
       rx_ring_ref = Gntref.to_int32 rx_gnt;
-      event_channel = string_of_int (evtchn_port);
-      feature_requests = { Features.
-        rx_copy = true;
-        rx_flip = false;
-        rx_notify = true;
-        sg = true;
-        gso_tcpv4 = false;
-        smart_poll = false;
-      };
+      event_channel = string_of_int evtchn_port;
+      feature_requests = Features.supported;
     } in
     C.write_frontend_configuration id front_conf >>= fun () ->
     C.connect id >>= fun () ->
@@ -134,17 +125,14 @@ module Make(C: S.CONFIGURATION) = struct
     (* Register callback activation *)
     let backend = backend_conf.S.backend in
     C.read_mtu id >>= fun mtu ->
-    return { vif_id; backend_id; tx_client; tx_gnt; tx_mutex; tx_pool;
-             rx_gnt; rx_fring; rx_client; rx_map; rx_id = 0 ; stats;
+    return { vif_id; backend_id; tx_fring; tx_client; tx_gnt; tx_mutex; tx_pool;
+             rx_gnt; rx_fring; rx_client; rx_map; rx_id = 0; stats;
              evtchn; mac; mtu; backend; features;
              free_pages = Io_page.to_pages (Io_page.get 256); (* Allocate 256*4kB=1MB of free_pages*)
            }
 
   (** Set of active block devices *)
   let devices : (int, t) Hashtbl.t = Hashtbl.create 1
-
-  let notify nf () =
-    Xen_os.Eventchn.notify h nf.evtchn
 
   let take_pages t n =
     (* returns the first n elements of l, and l without them, assumes than l is long enough *)
@@ -160,7 +148,7 @@ module Make(C: S.CONFIGURATION) = struct
 
   external unsafe_fill_bigstring : Io_page.t -> int -> int -> int -> unit = "caml_fill_bigstring" [@@noalloc]
 
-  let return_page t p =
+  let _return_page t p =
     unsafe_fill_bigstring p 0 Io_page.page_size 0 ;
     t.free_pages <- p::t.free_pages
 
@@ -172,79 +160,111 @@ module Make(C: S.CONFIGURATION) = struct
       let pages = take_pages nf num in
       List.iter
         (fun (gref, page) ->
-           let rec next () =
-             let id = nf.rx_id in
-             nf.rx_id <- (succ nf.rx_id) mod (1 lsl 16) ;
-             if Hashtbl.mem nf.rx_map id then next () else id
-           in
-           let id = next () in
-           Export.grant_access ~domid:nf.backend_id ~writable:true gref page;
-           Hashtbl.add nf.rx_map id (gref, page);
-           let slot_id = Ring.Rpc.Front.next_req_id nf.rx_fring in
-           let slot = Ring.Rpc.Front.slot nf.rx_fring slot_id in
-           ignore(RX.Request.(write {id; gref = Gntref.to_int32 gref}) slot)
+          let rec next () =
+            let id = nf.rx_id in
+            nf.rx_id <- (succ nf.rx_id) mod (1 lsl 16);
+            if Hashtbl.mem nf.rx_map id then next () else id
+          in
+          let id = next () in
+          Export.grant_access ~domid:nf.backend_id ~writable:true gref page;
+          Hashtbl.add nf.rx_map id (gref, page);
+          let slot_id = Ring.Rpc.Front.next_req_id nf.rx_fring in
+          let slot = Ring.Rpc.Front.slot nf.rx_fring slot_id in
+          ignore(RX.Request.(write {id; gref = Gntref.to_int32 gref}) slot)
         ) (List.combine grefs pages);
       if Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring
-      then notify nf ();
+      then Netif_common.Eventchn.notify nf.evtchn ();
       return ()
     else return ()
 
-  let pop_rx_page nf id =
+  let pop_rx_page nf frag =
+    let id = frag.Assemble.id in
     let gref, page = Hashtbl.find nf.rx_map id in
+    let cs = Io_page.to_cstruct page in
     Hashtbl.remove nf.rx_map id;
     Export.end_access ~release_ref:true gref >>= fun () ->
-    Lwt.return page
+    Lwt.return cs
 
-  let rx_poll nf fn =
-    let module Recv = Assemble.Make(RX.Response) in
-    let q = ref [] in
-    Ring.Rpc.Front.ack_responses nf.rx_fring (fun slot ->
-      match RX.Response.read slot with
-      | Error msg -> failwith msg
-      | Ok req -> q := req :: !q
-    );
-    List.rev !q
-    |> Recv.group_frames
-    |> Lwt_list.iter_s (function
-      | Error (e, msgs) ->
-          Log.err (fun f -> f "received error: %d" e);
-          msgs |> Lwt_list.iter_s (fun msg ->
-            pop_rx_page nf msg.RX.Response.id >>= fun (page : Io_page.t) ->
-            return_page nf page ;
-            Lwt.return_unit
-          )
-      | Ok frame ->
-          let data = Cstruct.create frame.Recv.total_size in
-          let next = ref 0 in
-          frame.Recv.fragments |> Lwt_list.iter_s (fun {Recv.size; msg} ->
-            let {RX.Response.id; size = _; flags = _; offset} = msg in
-            pop_rx_page nf id >|= fun page ->
-            let buf = Io_page.to_cstruct page in
-            Cstruct.blit buf offset data !next size;
-            return_page nf page ;
-            next := !next + size
-          ) >|= fun () ->
-          assert (!next = Cstruct.length data);
-          Lwt.async (fun () ->
-            Stats.rx nf.stats (Int64.of_int (Cstruct.length data));
-            fn data)
-    )
+  module Frontend_RX_Ops = struct
+    type t = transport
+    let read_packets nf =
+      Assemble.RX_IO.read_packets 
+        ~ack_fn:(Ring.Rpc.Front.ack_responses nf.rx_fring)
+    let get_page nf frag = pop_rx_page nf frag
+    let notify_if_needed nf =
+      if Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring then
+        Xen_os.Eventchn.notify h nf.evtchn
+    let get_evtchn nf = nf.evtchn
+    let get_stats nf = nf.stats
+    let post_receive nf = refill_requests nf
+  end
 
-  let tx_poll nf =
-    Lwt_ring.Front.poll nf.tx_client (fun slot ->
-      let resp = TX.Response.read slot in
-      (resp.TX.Response.id, resp)
-    )
+  module Frontend_TX_Ops = struct
+    type t = transport
+    
+    let fragment_data nf data =
+      let size = Cstruct.length data in
+      let numneeded = Shared_page_pool.blocks_needed size in
+      
+      Lwt_ring.Front.wait_for_free nf.tx_client numneeded >>= fun () ->
+      
+      let rec copy_to_pages datav offset acc_frags = function
+        | 0 -> return (List.rev acc_frags)
+        | n ->
+            Shared_page_pool.use nf.tx_pool (fun ~id gref shared_block ->
+              let len, datav' = Cstruct.fillv ~src:datav ~dst:shared_block in
+              let frag = Assemble.{
+                id;
+                offset = shared_block.Cstruct.off;
+                size = len;
+                gref = Gntref.to_int32 gref;
+              } in
+            (* TODO: check return value... *)
+              return ((datav', frag, Io_page.get 1), Lwt.return_unit)
+            ) >>= fun ((datav', frag, page), _) ->
+            copy_to_pages datav' (offset + frag.size) ((frag, page) :: acc_frags) (n - 1)
+      in
+      
+      copy_to_pages [data] 0 [] numneeded
+    
+    let write_packet_to_ring nf packet =
+      Assemble.TX_IO.write_packet
+        ~get_slot:(fun () ->
+          let slot_id = Ring.Rpc.Front.next_req_id nf.tx_fring in
+          Ring.Rpc.Front.slot nf.tx_fring slot_id
+        )
+        ~packet
+    
+    let notify_if_needed nf =
+      if Ring.Rpc.Front.push_requests_and_check_notify nf.tx_fring then
+        Xen_os.Eventchn.notify h nf.evtchn
+    
+    let release_fragments _nf _fragments =
+      Lwt.return_unit
+    
+    let get_stats nf = nf.stats
+  end
 
-  let listen nf ~header_size:_ receive_callback =
-    let rec loop from =
-      rx_poll nf.t receive_callback >>= fun () ->
-      refill_requests nf.t >>= fun () ->
-      tx_poll nf.t;
-      Xen_os.Activations.after nf.t.evtchn from >>= fun from ->
-      loop from
-    in
-    loop Xen_os.Activations.program_start
+  module Receiver = Netif_common.Make_Receiver(Frontend_RX_Ops)
+  module Transmitter = Netif_common.Make_Transmitter(Frontend_TX_Ops)
+
+  let write nf ~size fillf =
+    let data = Cstruct.create size in
+    let len = fillf data in
+    if len > size then failwith "length exceeds total size" ;
+    let buf = Cstruct.sub data 0 len in
+    Lwt_mutex.with_lock nf.t.tx_mutex (fun () ->
+      Transmitter.write nf.t buf
+    ) >|= fun () -> Ok ()
+
+  let listen nf ~header_size receive_callback =
+    Receiver.listen nf.t ~header_size receive_callback
+
+  let mac nf = nf.t.mac
+  let mtu nf = nf.t.mtu
+  let get_stats nf = nf.t.stats
+  let get_stats_counters t = get_stats t
+  let reset_stats_counters t = Stats.reset (get_stats t)
 
   let connect id =
     (* If [id] is an integer, use it. Otherwise, return an error message
@@ -283,125 +303,4 @@ module Make(C: S.CONFIGURATION) = struct
     Shared_page_pool.shutdown t.t.tx_pool;
     Hashtbl.remove devices t.t.vif_id;
     return ()
-
-  (* Push up to one page's worth of data to the ring, but without sending an
-   * event notification. Once the data has been added to the ring, returns the
-   * remaining (unsent) data and a thread which will return when the data has
-   * been ack'd by netback. *)
-  let write_request ?size ~flags nf datav =
-    Shared_page_pool.use nf.t.tx_pool (fun ~id gref shared_block ->
-      let len, datav = Cstruct.fillv ~src:datav ~dst:shared_block in
-      (* [size] includes extra pages to follow later *)
-      let size = match size with |None -> len |Some s -> s in
-      Stats.tx nf.t.stats (Int64.of_int size);
-      let request = { TX.Request.
-        id;
-        gref = Gntref.to_int32 gref;
-        offset = shared_block.Cstruct.off;
-        flags;
-        size
-      } in
-      Lwt_ring.Front.write nf.t.tx_client
-          (fun slot -> TX.Request.write request slot; id) >>= fun replied ->
-      (* request has been written; when replied returns we have a reply *)
-      let release = replied >>= fun reply ->
-        let open TX.Response in
-        match reply.status with
-        | DROPPED -> failwith "Netif: backend dropped our frame"
-        | NULL -> failwith "Netif: NULL response"
-        | ERROR -> failwith "Netif: ERROR response"
-        | OKAY -> return () in
-      return (datav, release)
-    )
-
-  (* Transmit a packet applying fillf
-   * The buffer's data must fit in a single block. *)
-  let write_already_locked nf ~size fillf =
-    Shared_page_pool.use nf.t.tx_pool (fun ~id gref shared_block ->
-        Cstruct.memset shared_block 0;
-        let len = fillf (Cstruct.sub shared_block 0 size) in
-        if len > size then failwith "length exceeds size" ;
-        Stats.tx nf.t.stats (Int64.of_int len);
-        let request = { TX.Request.
-          id;
-          gref = Gntref.to_int32 gref;
-          offset = shared_block.Cstruct.off;
-          flags = Flags.empty;
-          size = len
-        } in
-        Lwt_ring.Front.write nf.t.tx_client
-          (fun slot -> TX.Request.write request slot; id) >>= fun replied ->
-        (* request has been written; when replied returns we have a reply *)
-        let release = replied >>= fun reply ->
-          let open TX.Response in
-          match reply.status with
-          | DROPPED -> failwith "Netif: backend dropped our frame"
-          | NULL -> failwith "Netif: NULL response"
-          | ERROR -> failwith "Netif: ERROR response"
-          | OKAY -> return () in
-        return ((), release)) >>= fun ((), th) ->
-    Lwt_ring.Front.push nf.t.tx_client (notify nf.t);
-    return th
-
-  (* Transmit a packet from a list of pages *)
-  let write_no_retry nf ~size fillf =
-    let numneeded = Shared_page_pool.blocks_needed size in
-    Lwt_mutex.with_lock nf.t.tx_mutex
-      (fun () ->
-         Lwt_ring.Front.wait_for_free nf.t.tx_client numneeded >>= fun () ->
-         match numneeded with
-         | 0 -> return (return ())
-         | 1 ->
-           (* If there is only one block, then just write it normally *)
-           write_already_locked nf ~size fillf
-         | n ->
-           let datav = Cstruct.create size in
-           let len = fillf datav in
-           if len > size then failwith "length exceeds total size" ;
-           let datav = Cstruct.sub datav 0 len in
-           (* For Xen Netfront, the first fragment contains the entire packet
-            * length, which the backend will use to consume the remaining
-            * fragments until the full length is satisfied *)
-           write_request ~flags:Flags.more_data ~size:len nf [datav]
-           >>= fun (datav, first_th) ->
-           let rec xmit datav = function
-             | 0 -> return []
-             | 1 ->
-                 write_request ~flags:Flags.empty nf datav
-                 >>= fun (datav, th) ->
-                 assert (Cstruct.lenv datav = 0);
-                 return [ th ]
-             | n ->
-                 write_request ~flags:Flags.more_data nf datav
-                 >>= fun (datav, next_th) ->
-                 xmit datav (n - 1)
-                 >>= fun rest ->
-                 return (next_th :: rest) in
-           xmit datav (n - 1)
-           >>= fun rest_th ->
-           (* All fragments are now written, we can now notify the backend *)
-           Lwt_ring.Front.push nf.t.tx_client (notify nf.t);
-           return (Lwt.join (first_th :: rest_th))
-      )
-
-  let rec write nf ~size fillf =
-    Lwt.catch
-      (fun () -> write_no_retry nf ~size fillf)
-      (function
-        | Lwt_ring.Shutdown -> return (Lwt.fail Lwt_ring.Shutdown)
-        | e -> Lwt.fail e)
-    >>= fun released ->
-    Lwt.on_failure released (function
-        | Lwt_ring.Shutdown -> ignore (write nf ~size fillf)
-        | ex -> raise ex
-      );
-    return (Ok ())
-
-  (* The Xenstore MAC address is colon separated, very helpfully *)
-  let mac nf = nf.t.mac
-  let mtu nf = nf.t.mtu
-
-  let get_stats_counters t = t.t.stats
-
-  let reset_stats_counters t = Stats.reset t.t.stats
 end

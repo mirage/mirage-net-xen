@@ -2,6 +2,7 @@
  * Copyright (c) 2010-2013 Anil Madhavapeddy <anil@recoil.org>
  * Copyright (c) 2014-2015 Citrix Inc
  * Copyright (c) 2015 Thomas Leonard <talex5@gmail.com>
+ * Copyright (c) 2026 Pierre Alain <pierre.alain@tuta.io>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -71,7 +72,7 @@ module Make(C: S.CONFIGURATION) = struct
     mutable to_netfront: (RX.Response.t,int) Ring.Rpc.Back.t option;
     rx_reqs: RX.Request.t Lwt_dllist.t;         (* Grants we can write into *)
     mutable from_netfront: (TX.Response.t,int) Ring.Rpc.Back.t option;
-    stats: stats;
+    stats: Mirage_net.stats;
     write_mutex: Lwt_mutex.t;
     get_free_mutex: Lwt_mutex.t;
   }
@@ -90,7 +91,7 @@ module Make(C: S.CONFIGURATION) = struct
     C.read_frontend_configuration id >>= fun f ->
     let channel = Xen_os.Eventchn.bind_interdomain h frontend_id (int_of_string f.S.event_channel) in
     Cleanup.push cleanup (fun () -> Xen_os.Eventchn.unbind h channel; return ());
-    (* Note: TX and RX are from netfront's point of view (e.g. we receive on TX). *)
+    (* Note: TX and RX are from netfront's point of view (e.g. we receive on TX). *)    
     let from_netfront =
       let tx_gnt = {Import.domid = frontend_id; ref = Gntref.of_int32 f.S.tx_ring_ref} in
       let mapping = Import.map_exn tx_gnt ~writable:true in
@@ -125,10 +126,10 @@ module Make(C: S.CONFIGURATION) = struct
       return ()
     );
     Lwt.async (fun () ->
-        C.wait_for_frontend_closing id >>= fun () ->
-        Log.info (fun f -> f "Frontend asked to close network device dom:%d/vif:%d" domid device_id);
-        Lwt_switch.turn_off switch
-      );
+      C.wait_for_frontend_closing id >>= fun () ->
+      Log.info (fun f -> f "Frontend closing dom:%d/vif:%d" domid device_id);
+      Lwt_switch.turn_off switch
+    );
     return t
 
   let make ~domid ~device_id =
@@ -137,81 +138,52 @@ module Make(C: S.CONFIGURATION) = struct
       (fun () -> create ~switch ~domid ~device_id)
       (fun ex -> Lwt_switch.turn_off switch >>= fun () -> Lwt.fail ex)
 
-  (* Loop checking for incoming requests on the from_netfront ring.
-     Frames received will go to [fn]. *)
-  let listen (t: t) ~header_size:_ fn : (unit, error) result Lwt.t =
-    let from_netfront () =
-      match t.from_netfront with
-      | None -> raise Netback_shutdown
-      | Some x -> x in
-    let module Recv = Assemble.Make(TX.Request) in
-    let rec loop after =
-      let q = ref [] in
-      Ring.Rpc.Back.ack_requests (from_netfront ())
-        (fun slot ->
-          match TX.Request.read slot with
-          | Error msg -> Log.warn (fun f -> f "read_read TX has unparseable request: %s" msg)
-          | Ok req ->
-            q := req :: !q
-        );
-      (* -- at this point the ring slots may be overwritten, but the grants are still valid *)
-      List.rev !q
-      |> Recv.group_frames
-      |> Lwt_list.iter_s (function
-        | Error (e, _) -> e.TX.Request.impossible
-        | Ok frame ->
-            let data = Cstruct.create frame.Recv.total_size in
-            let next = ref 0 in
-            frame.Recv.fragments |> Lwt_list.iter_s (fun {Recv.size; msg} ->
-              let { TX.Request.flags = _; size = _; offset; gref; id } = msg in
-              let gnt = { Import.
-                domid = t.frontend_id;
-                ref = Gntref.of_int32 gref
-              } in
-              Import.with_mapping gnt ~writable:false (fun mapping ->
-                  let buf = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-                  Cstruct.blit buf offset data !next size;
-                  next := !next + size;
-                  let slot =
-                    let ring = from_netfront () in
-                    Ring.Rpc.Back.(slot ring (next_res_id ring)) in
-                  let resp = { TX.Response.id; status = TX.Response.OKAY } in
-                  TX.Response.write resp slot;
-                  return ()
-                )
-              >|= function
-              | Error (`Msg m) -> failwith m   (* Couldn't map client's grant; give up *)
-              | Ok () -> ()
-            ) >|= fun () ->
-            assert (!next = Cstruct.length data);
-            Stats.rx t.stats (Int64.of_int (Cstruct.length data));
-            Lwt.async (fun () -> fn data)
-      )
-      >>= fun () ->
-      let notify = Ring.Rpc.Back.push_responses_and_check_notify (from_netfront ()) in
-      if notify then Xen_os.Eventchn.notify h t.channel;
-      Xen_os.Activations.after t.channel after
-      >>= loop in
-    Lwt.catch
-      (fun () -> loop Xen_os.Activations.program_start >|= fun `Never_returns -> assert false)
-      (function
-        | Netback_shutdown -> Lwt.return (Ok ())
-        | ex -> Lwt.fail ex
-      )
+  let from_netfront t =
+    match t.from_netfront with
+    | None -> raise Netback_shutdown
+    | Some x -> x
 
   let to_netfront t =
     match t.to_netfront with
     | None -> raise Netback_shutdown
     | Some x -> x
 
-  (* We need [n] pages to send a packet to the frontend. The Ring.Back API
-     gives us all the requests that are available at once. Since we may need
-     fewer of this, stash them in the t.rx_reqs sequence.
-     Raises [Netback_shutdown] if the interface has been shut down. *)
+  let map_and_respond t frag =
+    let gnt = { Import.domid = t.frontend_id; ref = Gntref.of_int32 frag.Assemble.gref } in
+    Import.with_mapping gnt ~writable:false (fun mapping ->
+      let cs = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+      (* We must do a copy here otherwise the page is claimed back by the other side... *)
+      let cpy = Cstruct.sub_copy cs 0 (Cstruct.length cs) in
+      let slot = 
+        let ring = from_netfront t in
+        Ring.Rpc.Back.(slot ring (next_res_id ring))
+      in
+      let resp = { TX.Response.id = frag.id; status = TX.Response.OKAY } in
+      TX.Response.write resp slot;
+      Lwt.return cpy
+    ) >>= function
+    | Error (`Msg m) -> Lwt.fail_with m
+    | Ok page -> Lwt.return page
+
+  module Backend_RX_Ops = struct
+    type nonrec t = t
+    let read_packets t =
+      Assemble.TX_IO.read_packets 
+        ~ack_fn:(Ring.Rpc.Back.ack_requests (from_netfront t))
+    let get_page t frag = map_and_respond t frag
+    let notify_if_needed t =
+      if Ring.Rpc.Back.push_responses_and_check_notify (from_netfront t) then
+        Xen_os.Eventchn.notify h t.channel
+    let get_evtchn t = t.channel
+    let get_stats t = t.stats
+    let post_receive _t = Lwt.return_unit
+  end
+
   let get_n_grefs t n =
     let rec take seq = function
-    | 0 -> []
-    | n -> Lwt_dllist.take_l seq :: (take seq (n - 1)) in
+      | 0 -> []
+      | n -> Lwt_dllist.take_l seq :: (take seq (n - 1))
+    in
     let rec loop after =
       let n' = Lwt_dllist.length t.rx_reqs in
       if n' >= n then return (take t.rx_reqs n)
@@ -224,80 +196,95 @@ module Make(C: S.CONFIGURATION) = struct
         if Lwt_dllist.length t.rx_reqs <> n'
         then loop after
         else Xen_os.Activations.after t.channel after >>= loop
-      end in
-    (* We lock here so that we handle one frame at a time.
-       Otherwise, we might divide the free pages among lots of
-       waiters and deadlock. *)
+      end
+    in
     Lwt_mutex.with_lock t.get_free_mutex (fun () ->
       loop Xen_os.Activations.program_start
     )
 
+  module Backend_TX_Ops = struct
+    type nonrec t = t
+    
+    let fragment_data t data =
+      let size = Cstruct.length data in
+      let pages_needed = max 1 @@ Io_page.round_to_page_size size / Io_page.page_size in      
+      get_n_grefs t pages_needed >>= fun reqs ->
+      let rec map_and_copy src offset acc_frags = function
+        | [] -> return (List.rev acc_frags)
+        | req :: rest ->
+            let gnt = {Import.domid = t.frontend_id; ref = Gntref.of_int32 req.RX.Request.gref} in
+            let mapping = Import.map_exn gnt ~writable:true in
+            let dst = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+            Cstruct.memset dst 0;
+            let to_copy = min (Cstruct.length dst) (Cstruct.length src - offset) in
+            let src_part = Cstruct.sub src offset to_copy in
+            Cstruct.blit src_part 0 dst 0 to_copy;
+            let frag = Assemble.{
+              id = req.RX.Request.id;
+              offset = 0;
+              size = to_copy;
+              gref = req.RX.Request.gref;
+            } in
+            let page = Import.Local_mapping.to_buf mapping in
+            Import.Local_mapping.unmap_exn mapping;
+            map_and_copy src (offset + to_copy) ((frag, page) :: acc_frags) rest
+      in
+      map_and_copy data 0 [] reqs
+    
+    let write_packet_to_ring t packet =
+      Assemble.RX_IO.write_packet
+        ~get_slot:(fun () ->
+          let ring = to_netfront t in
+          Ring.Rpc.Back.(slot ring (next_res_id ring))
+        )
+        ~packet
+    
+    let notify_if_needed t =
+      if Ring.Rpc.Back.push_responses_and_check_notify (to_netfront t) then
+        Xen_os.Eventchn.notify h t.channel
+    
+    let release_fragments _t _fragments =
+      Lwt.return_unit
+    
+    let get_stats t = t.stats
+  end
+
+  module Receiver = Netif_common.Make_Receiver(Backend_RX_Ops)
+  module Transmitter = Netif_common.Make_Transmitter(Backend_TX_Ops)
+
   let write t ~size fillf =
     Lwt.catch
       (fun () ->
-         let pages_needed = max 1 @@ Io_page.round_to_page_size size / Io_page.page_size in
-         (* Collect enough free pages from the client. *)
-         get_n_grefs t pages_needed >>= fun reqs ->
-         Lwt_mutex.with_lock t.write_mutex (fun () ->
-             match reqs with
-             | [ r ] ->
-               let gnt = {Import.domid = t.frontend_id; ref = Gntref.of_int32 r.RX.Request.gref} in
-               let mapping = Import.map_exn gnt ~writable:true in
-               let dst = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-               Cstruct.memset dst 0;
-               let len = fillf (Cstruct.sub dst 0 size) in
-               Import.Local_mapping.unmap_exn mapping;
-               if len > size then failwith "length exceeds total size" ;
-               let slot =
-                 let ring = to_netfront t in
-                 Ring.Rpc.Back.(slot ring (next_res_id ring)) in
-               let size = Ok len in
-               let flags = Flags.empty in
-               let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
-               RX.Response.write resp slot;
-               Stats.tx t.stats (Int64.of_int len);
-               return ()
-             | reqs ->
-               let rec fill_reqs ~src ~is_first = function
-                 | r :: rs ->
-                   let gnt = {Import.domid = t.frontend_id; ref = Gntref.of_int32 r.RX.Request.gref} in
-                   let mapping = Import.map_exn gnt ~writable:true in
-                   let dst = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-                   let len, src = Cstruct.fillv ~src ~dst in
-                   Import.Local_mapping.unmap_exn mapping;
-                   let slot =
-                     let ring = to_netfront t in
-                     Ring.Rpc.Back.(slot ring (next_res_id ring)) in
-                   let size = Ok (if is_first then size else len) in
-                   let flags = if rs = [] then Flags.empty else Flags.more_data in
-                   let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
-                   RX.Response.write resp slot;
-                   fill_reqs ~src ~is_first:false rs
-                 | [] when Cstruct.lenv src = 0 -> ()
-                 | [] -> failwith "BUG: not enough pages for data!" in
-               (* TODO: find a smarter way to not need to copy around *)
-               let data = Cstruct.create size in
-               let len = fillf data in
-               if len > size then failwith "length exceeds total size" ;
-               let src = Cstruct.sub data 0 len in
-               fill_reqs ~src:[src] ~is_first:true reqs;
-               Stats.tx t.stats (Int64.of_int len);
-               return ()
-           ) >|= fun () -> Ok (
-           if Ring.Rpc.Back.push_responses_and_check_notify (to_netfront t)
-           then Xen_os.Eventchn.notify h t.channel)
+        let data = Cstruct.create size in
+        let len = fillf data in
+        if len > size then failwith "length exceeds total size";
+        let buf = Cstruct.sub data 0 len in
+        
+        Lwt_mutex.with_lock t.write_mutex (fun () ->
+          Transmitter.write t buf
+        ) >|= fun () -> Ok ()
       )
       (function
         | Netback_shutdown -> Lwt.return (Error `Disconnected)
         | ex -> Lwt.fail ex
       )
 
-  let get_stats_counters t = t.stats
-  let reset_stats_counters t = Stats.reset t.stats
+  let listen (t: t) ~header_size fn : (unit, error) result Lwt.t =
+    Lwt.catch
+      (fun () -> 
+        Receiver.listen t ~header_size fn >|= fun `Never_returns -> 
+        assert false
+      )
+      (function
+        | Netback_shutdown -> Lwt.return (Ok ())
+        | ex -> Lwt.fail ex
+      )
 
-  let frontend_mac t = t.frontend_mac
   let mac t = t.mac
   let mtu t = t.mtu
-
+  let get_stats t = t.stats
+  let get_stats_counters t = get_stats t
+  let reset_stats_counters t = Stats.reset (get_stats t)
   let disconnect _t = failwith "TODO: disconnect"
+  let frontend_mac t = t.frontend_mac
 end

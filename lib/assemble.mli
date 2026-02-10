@@ -14,34 +14,48 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-(** Assemble complete network frames from Xen network messages. *)
+(** Assemble complete network packets from Xen network messages. *)
+type fragment = {
+  id: int;
+  offset: int;
+  size: int;
+  gref: int32;
+}
 
-module type FRAME_MSG = sig
-  type error
+type packet = {
+  total_size: int;
+  fragments: fragment list;
+}
+
+
+module type SIZE_STRATEGY = sig
+  val name : string
+  
+  val compute_sizes_read : 
+    first_size:int -> rest_sizes:int list -> (int * int)
+  
+  val compute_first_size_write :
+    total_size:int -> rest_sizes:int list -> int
+end
+
+module type MESSAGE = sig
   type t
+  type error
+  
+  val read : Cstruct.t -> (t, string) result
+  val write : t -> Cstruct.t -> unit
+  val id : t -> int
+  val offset : t -> int
   val flags : t -> Flags.t
   val size : t -> (int, error) result
+  val gref : t -> int32
+  val make : id:int -> offset:int -> flags:Flags.t -> size:int -> gref:int32 -> t
 end
 
-module Make(F : FRAME_MSG) : sig
-  type fragment = {
-    size : int;
-    (** The size field in F.t is complicated (the first message contains
-        the size of the whole frame, and any size may contain an error). This
-        size field is instead simply the size of the fragment. *)
-
-    msg : F.t;
-  }
-
-  type frame = {
-    total_size : int;
-    fragments : fragment list;
-  }
-
-  val group_frames : F.t list -> (frame, (F.error * F.t list)) result list
-  (** Convert a list of requests into a list of frames.
-      If any fragment contains an error, then the whole frame is an error.
-      The error value includes all the messages in the frame, so they can
-      be released. *)
+module type IO = sig
+  val read_packets : ack_fn:((Cstruct.t -> unit) -> unit) -> packet list
+  val write_packet : get_slot:(unit -> Cstruct.t) -> packet:packet -> unit
 end
 
+module RX_IO : IO
+module TX_IO : IO

@@ -20,6 +20,8 @@
 
 type t
 
+val block_size : int
+
 val make : (Xen_os.Xen.Gntref.t -> Io_page.t -> unit) -> t
 (** [make grant_access] is a shared pool of blocks. When a new page is first
     allocated, [grant_access] is called to share it. *)
