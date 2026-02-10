@@ -134,7 +134,7 @@ module Make(C: S.CONFIGURATION) = struct
   (** Set of active block devices *)
   let devices : (int, t) Hashtbl.t = Hashtbl.create 1
 
-  let take_pages t n =
+  let _take_pages t n =
     (* returns the first n elements of l, and l without them, assumes than l is long enough *)
     let rec split_list l n acc = match n, l with
         | 0, _ -> acc, l
