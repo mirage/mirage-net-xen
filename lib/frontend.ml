@@ -157,7 +157,7 @@ module Make(C: S.CONFIGURATION) = struct
     if num > 0 then
       Export.get_n num
       >>= fun grefs ->
-      let pages = take_pages nf num in
+      let pages = Io_page.to_pages (Io_page.get num) in (* TEMP: as we don't currently return pages, we need to allocate new pages each time *)
       List.iter
         (fun (gref, page) ->
           let rec next () =
