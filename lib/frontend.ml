@@ -104,7 +104,7 @@ module Make(C: S.CONFIGURATION) = struct
     create_tx (vif_id, backend_id)
     >>= fun (tx_gnt, tx_fring, tx_client) ->
     let tx_mutex = Lwt_mutex.create () in
-    let evtchn = Netif_common.Eventchn.bind_unbound_port backend_id in
+    let evtchn = Xen_os.Eventchn.bind_unbound_port h backend_id in
     let evtchn_port = Xen_os.Eventchn.to_int evtchn in
     (* Write Xenstore info and set state to Connected *)
     let front_conf = { S.
@@ -173,7 +173,7 @@ module Make(C: S.CONFIGURATION) = struct
           ignore(RX.Request.(write {id; gref = Gntref.to_int32 gref}) slot)
         ) (List.combine grefs pages);
       if Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring
-      then Netif_common.Eventchn.notify nf.evtchn ();
+      then Xen_os.Eventchn.notify h nf.evtchn;
       return ()
     else return ()
 
