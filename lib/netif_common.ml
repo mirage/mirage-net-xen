@@ -77,6 +77,7 @@ module Make_Receiver(Ops : RECEIVE_OPS) = struct
     )
   
   let listen t ~header_size:_ callback =
+(*
     let rec loop after =
       let evtchn = Ops.get_evtchn t in
       Log.debug (fun f -> f "[RX] Event received on evtchn %d, processing..." 
@@ -90,6 +91,33 @@ module Make_Receiver(Ops : RECEIVE_OPS) = struct
       Xen_os.Activations.after (Ops.get_evtchn t) after >>= loop
     in
     loop Xen_os.Activations.program_start
+*)
+    let rec loop_with_recheck after =
+      let evtchn = Ops.get_evtchn t in
+      
+      (* Process available packets *)
+      rx_poll t callback >>= fun () ->
+      
+      (* Refill/post-process *)
+      Ops.post_receive t >>= fun () ->
+      
+      (* Notify backend if needed *)
+      Ops.notify_if_needed t;
+      
+      (* CRITICAL: Check again for new packets to avoid race condition.
+         New packets might have arrived while we were processing. *)
+      let new_packets = Ops.read_packets t in
+      if List.length new_packets > 0 then begin
+        Log.debug (fun f -> f "[RX] Race detected: %d new packets arrived during processing, re-polling immediately" (List.length new_packets));
+        (* Don't wait, loop immediately to process the new packets *)
+        loop_with_recheck after
+      end else begin
+        Log.debug (fun f -> f "[RX] No new packets, waiting for event on evtchn %d" 
+          (Xen_os.Eventchn.to_int evtchn));
+        Xen_os.Activations.after evtchn after >>= loop_with_recheck
+      end
+    in
+    loop_with_recheck Xen_os.Activations.program_start
 end
 
 module type TRANSMIT_OPS = sig
