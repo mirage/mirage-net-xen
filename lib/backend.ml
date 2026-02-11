@@ -168,12 +168,18 @@ module Make(C: S.CONFIGURATION) = struct
   module Backend_RX_Ops = struct
     type nonrec t = t
     let read_packets t =
+      Log.debug (fun f -> f "[Backend.RX] read_packets: reading from ring");
       Assemble.TX_IO.read_packets 
         ~ack_fn:(Ring.Rpc.Back.ack_requests (from_netfront t))
     let get_page t frag = map_and_respond t frag
     let notify_if_needed t =
-      if Ring.Rpc.Back.push_responses_and_check_notify (from_netfront t) then
+      let should_notify = Ring.Rpc.Back.push_responses_and_check_notify (from_netfront t) in
+      Log.debug (fun f -> f "[Backend.RX] notify_if_needed: should_notify=%b" should_notify);
+      
+      if should_notify then begin
+        Log.debug (fun f -> f "[Backend.RX] Sending notification on evtchn");
         Xen_os.Eventchn.notify h t.channel
+      end
     let get_evtchn t = t.channel
     let get_stats t = t.stats
     let post_receive _t = Lwt.return_unit
@@ -186,19 +192,29 @@ module Make(C: S.CONFIGURATION) = struct
     in
     let rec loop after =
       let n' = Lwt_dllist.length t.rx_reqs in
+      Log.debug (fun f -> f "[Backend.TX] get_n_grefs: need %d, have %d" n n');
       if n' >= n then return (take t.rx_reqs n)
       else begin
+        Log.debug (fun f -> f "[Backend.TX] Not enough grefs, acking requests from ring");
         Ring.Rpc.Back.ack_requests (to_netfront t)
           (fun slot ->
             let req = RX.Request.read slot in
+            Log.debug (fun f -> f "[Backend.TX] Got RX request: id=%d gref=%ld" 
+              req.RX.Request.id req.RX.Request.gref);
             ignore(Lwt_dllist.add_r req t.rx_reqs)
           );
+        let new_n = Lwt_dllist.length t.rx_reqs in
+        Log.debug (fun f -> f "[Backend.TX] After acking: had %d, now have %d grefs" n' new_n);
         if Lwt_dllist.length t.rx_reqs <> n'
         then loop after
-        else Xen_os.Activations.after t.channel after >>= loop
+        else begin
+          Log.debug (fun f -> f "[Backend.TX] No new grefs, waiting for event on channel");
+          Xen_os.Activations.after t.channel after >>= loop
+        end
       end
     in
     Lwt_mutex.with_lock t.get_free_mutex (fun () ->
+      Log.debug (fun f -> f "[Backend.TX] get_n_grefs: acquired lock, starting");
       loop Xen_os.Activations.program_start
     )
 
@@ -208,7 +224,10 @@ module Make(C: S.CONFIGURATION) = struct
     let fragment_data t data =
       let size = Cstruct.length data in
       let pages_needed = max 1 @@ Io_page.round_to_page_size size / Io_page.page_size in      
+      Log.debug (fun f -> f "[Backend.TX] fragment_data: size=%d, pages_needed=%d" 
+        size pages_needed);
       get_n_grefs t pages_needed >>= fun reqs ->
+      Log.debug (fun f -> f "[Backend.TX] Got %d grant refs, mapping and copying" (List.length reqs));
       let rec map_and_copy src offset acc_frags = function
         | [] -> return (List.rev acc_frags)
         | req :: rest ->
@@ -240,8 +259,13 @@ module Make(C: S.CONFIGURATION) = struct
         ~packet
     
     let notify_if_needed t =
-      if Ring.Rpc.Back.push_responses_and_check_notify (to_netfront t) then
+      let should_notify = Ring.Rpc.Back.push_responses_and_check_notify (to_netfront t) in
+      Log.debug (fun f -> f "[Backend.TX] notify_if_needed: should_notify=%b" should_notify);
+      
+      if should_notify then begin
+        Log.debug (fun f -> f "[Backend.TX] Sending notification on evtchn");
         Xen_os.Eventchn.notify h t.channel
+      end
     
     let release_fragments _t _fragments =
       Lwt.return_unit

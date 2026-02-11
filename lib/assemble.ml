@@ -15,6 +15,9 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
+let src = Logs.Src.create "assemble" ~doc:"Packet assembly debugging"
+module Log = (val Logs.src_log src : Logs.LOG)
+
 type fragment = {
   id: int;
   offset: int;
@@ -116,7 +119,10 @@ module Make_Reader(Msg : MESSAGE)(Size : SIZE_STRATEGY) = struct
       | Error e -> Logs.warn (fun f -> f "[%s] Bad msg: %s" Size.name e)
       | Ok msg -> messages := msg :: !messages
     );
-    List.rev !messages
+    let result = List.rev !messages in
+    Log.debug (fun f -> f "[%s.Reader] collect_messages: collected %d messages" 
+      Size.name (List.length result));
+    result
   
   let rec group_into_packets = function
     | [] -> []
@@ -158,7 +164,11 @@ module Make_Reader(Msg : MESSAGE)(Size : SIZE_STRATEGY) = struct
     { total_size; fragments = first_fragment :: rest_fragments }
   
   let read_packets ack_fn =
-    collect_messages ack_fn |> group_into_packets
+    let messages = collect_messages ack_fn in
+    let packets = group_into_packets messages in
+    Log.debug (fun f -> f "[%s.Reader] read_packets: %d messages -> %d packets" 
+      Size.name (List.length messages) (List.length packets));
+    packets
 end
 
 module Make_Writer(Msg : MESSAGE)(Size : SIZE_STRATEGY) = struct
@@ -167,6 +177,8 @@ module Make_Writer(Msg : MESSAGE)(Size : SIZE_STRATEGY) = struct
     match packet.fragments with
     | [] -> failwith "Empty packet"
     | first_frag :: rest_frags ->
+        Log.debug (fun f -> f "[%s.Writer] write_packet: total_size=%d, %d fragments" 
+          Size.name packet.total_size (List.length packet.fragments));
         let rest_sizes = List.map (fun f -> f.size) rest_frags in
         let first_msg_size =
           if rest_frags = [] then first_frag.size

@@ -154,9 +154,11 @@ module Make(C: S.CONFIGURATION) = struct
 
   let refill_requests nf =
     let num = Ring.Rpc.Front.get_free_requests nf.rx_fring in
+    Log.debug (fun f -> f "[Frontend.RX] refill_requests: %d free slots available" num);
     if num > 0 then
       Export.get_n num
       >>= fun grefs ->
+      Log.debug (fun f -> f "[Frontend.RX] Got %d grants, adding to ring" num);
       let pages = Io_page.to_pages (Io_page.get num) in (* TEMP: as we don't currently return pages, we need to allocate new pages each time *)
       List.iter
         (fun (gref, page) ->
@@ -172,6 +174,9 @@ module Make(C: S.CONFIGURATION) = struct
           let slot = Ring.Rpc.Front.slot nf.rx_fring slot_id in
           ignore(RX.Request.(write {id; gref = Gntref.to_int32 gref}) slot)
         ) (List.combine grefs pages);
+      let should_notify = Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring in
+      Log.debug (fun f -> f "[Frontend.RX] refill_requests: pushed %d requests, notify=%b" 
+        num should_notify);
       if Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring
       then Xen_os.Eventchn.notify h nf.evtchn;
       return ()
@@ -192,8 +197,14 @@ module Make(C: S.CONFIGURATION) = struct
         ~ack_fn:(Ring.Rpc.Front.ack_responses nf.rx_fring)
     let get_page nf frag = pop_rx_page nf frag
     let notify_if_needed nf =
-      if Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring then
+      let should_notify = Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring in
+      Log.debug (fun f -> f "[Frontend.RX] notify_if_needed: should_notify=%b" should_notify);
+      
+      if should_notify then begin
+        Log.debug (fun f -> f "[Frontend.RX] Sending notification on evtchn %d" 
+          (Xen_os.Eventchn.to_int nf.evtchn));
         Xen_os.Eventchn.notify h nf.evtchn
+      end
     let get_evtchn nf = nf.evtchn
     let get_stats nf = nf.stats
     let post_receive nf = refill_requests nf
@@ -205,8 +216,12 @@ module Make(C: S.CONFIGURATION) = struct
     let fragment_data nf data =
       let size = Cstruct.length data in
       let numneeded = Shared_page_pool.blocks_needed size in
+      let free_slots = Ring.Rpc.Front.get_free_requests nf.tx_fring in
+      Log.debug (fun f -> f "[Frontend.TX] fragment_data: size=%d, need %d blocks, ring has %d free slots" 
+        size numneeded free_slots);
       
       Lwt_ring.Front.wait_for_free nf.tx_client numneeded >>= fun () ->
+      Log.debug (fun f -> f "[Frontend.TX] wait_for_free completed, proceeding with copy");
       
       let rec copy_to_pages datav offset acc_frags = function
         | 0 -> return (List.rev acc_frags)
@@ -236,8 +251,14 @@ module Make(C: S.CONFIGURATION) = struct
         ~packet
     
     let notify_if_needed nf =
-      if Ring.Rpc.Front.push_requests_and_check_notify nf.tx_fring then
+      let should_notify = Ring.Rpc.Front.push_requests_and_check_notify nf.tx_fring in
+      Log.debug (fun f -> f "[Frontend.TX] notify_if_needed: should_notify=%b" should_notify);
+      
+      if should_notify then begin
+        Log.debug (fun f -> f "[Frontend.TX] Sending notification on evtchn %d" 
+          (Xen_os.Eventchn.to_int nf.evtchn));
         Xen_os.Eventchn.notify h nf.evtchn
+      end
     
     let release_fragments _nf _fragments =
       Lwt.return_unit
