@@ -72,7 +72,19 @@ module Make_Receiver(Ops : RECEIVE_OPS) = struct
       assemble_packet packet (Ops.get_page t) >>= fun data ->
       Stats.rx (Ops.get_stats t) (Int64.of_int packet.total_size);
       Log.debug (fun f -> f "[RX] Assembled packet size=%d, calling callback" packet.total_size);
-      Lwt.async (fun () -> callback data);
+      Lwt.async (fun () ->
+              Log.debug (fun f -> f "[RX] Callback starting for packet size=%d" packet.total_size);
+              Lwt.catch
+                (fun () -> 
+                  callback data >>= fun () ->
+                  Log.debug (fun f -> f "[RX] Callback COMPLETED for packet size=%d" packet.total_size);
+                  Lwt.return_unit
+                )
+                (fun ex ->
+                  Log.err (fun f -> f "[RX] Callback FAILED with exception: %s" (Printexc.to_string ex));
+                  Lwt.return_unit
+                )
+            );
       Lwt.return_unit
     )
   
