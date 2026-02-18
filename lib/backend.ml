@@ -72,7 +72,7 @@ module Make(C: S.CONFIGURATION) = struct
     mutable to_netfront: (RX.Response.t,int) Ring.Rpc.Back.t option;
     rx_reqs: RX.Request.t Lwt_dllist.t;         (* Grants we can write into *)
     mutable from_netfront: (TX.Response.t,int) Ring.Rpc.Back.t option;
-    stats: Mirage_net.stats;
+    stats: stats;
     write_mutex: Lwt_mutex.t;
     get_free_mutex: Lwt_mutex.t;
   }
@@ -91,7 +91,7 @@ module Make(C: S.CONFIGURATION) = struct
     C.read_frontend_configuration id >>= fun f ->
     let channel = Xen_os.Eventchn.bind_interdomain h frontend_id (int_of_string f.S.event_channel) in
     Cleanup.push cleanup (fun () -> Xen_os.Eventchn.unbind h channel; return ());
-    (* Note: TX and RX are from netfront's point of view (e.g. we receive on TX). *)    
+    (* Note: TX and RX are from netfront's point of view (e.g. we receive on TX). *)
     let from_netfront =
       let tx_gnt = {Import.domid = frontend_id; ref = Gntref.of_int32 f.S.tx_ring_ref} in
       let mapping = Import.map_exn tx_gnt ~writable:true in
@@ -126,10 +126,10 @@ module Make(C: S.CONFIGURATION) = struct
       return ()
     );
     Lwt.async (fun () ->
-      C.wait_for_frontend_closing id >>= fun () ->
-      Log.info (fun f -> f "Frontend closing dom:%d/vif:%d" domid device_id);
-      Lwt_switch.turn_off switch
-    );
+        C.wait_for_frontend_closing id >>= fun () ->
+        Log.info (fun f -> f "Frontend closing dom:%d/vif:%d" domid device_id);
+        Lwt_switch.turn_off switch
+      );
     return t
 
   let make ~domid ~device_id =
@@ -191,9 +191,8 @@ module Make(C: S.CONFIGURATION) = struct
      Raises [Netback_shutdown] if the interface has been shut down. *)
   let get_n_grefs t n =
     let rec take seq = function
-      | 0 -> []
-      | n -> Lwt_dllist.take_l seq :: (take seq (n - 1))
-    in
+    | 0 -> []
+    | n -> Lwt_dllist.take_l seq :: (take seq (n - 1)) in
     let rec loop after =
       let n' = Lwt_dllist.length t.rx_reqs in
       Log.debug (fun f -> f "[Backend.TX] get_n_grefs: need %d, have %d" n n');
@@ -215,8 +214,7 @@ module Make(C: S.CONFIGURATION) = struct
           Log.debug (fun f -> f "[Backend.TX] No new grefs, waiting for event on channel");
           Xen_os.Activations.after t.channel after >>= loop
         end
-      end
-    in
+      end in
     (* We lock here so that we handle one frame at a time.
        Otherwise, we might divide the free pages among lots of
        waiters and deadlock. *)
@@ -311,11 +309,12 @@ module Make(C: S.CONFIGURATION) = struct
         | ex -> Lwt.fail ex
       )
 
+  let frontend_mac t = t.frontend_mac
   let mac t = t.mac
   let mtu t = t.mtu
+
   let get_stats t = t.stats
   let get_stats_counters t = get_stats t
   let reset_stats_counters t = Stats.reset (get_stats t)
   let disconnect _t = failwith "TODO: disconnect"
-  let frontend_mac t = t.frontend_mac
 end

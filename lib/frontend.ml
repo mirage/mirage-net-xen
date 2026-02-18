@@ -103,8 +103,10 @@ module Make(C: S.CONFIGURATION) = struct
              | TX.Response.OKAY -> "OKAY") id)
     )
 
+  (* Given a VIF ID, construct a netfront record for it *)
   let plug_inner vif_id =
     let id = `Client vif_id in
+    (* Read details about the device *)
     C.read_backend id >>= fun backend_conf ->
     let backend_id = backend_conf.S.backend_id in
     Log.info (fun f -> f "create: id=%d domid=%d" vif_id backend_id);
@@ -149,6 +151,9 @@ module Make(C: S.CONFIGURATION) = struct
   (** Set of active block devices *)
   let devices : (int, t) Hashtbl.t = Hashtbl.create 1
 
+  let notify nf () =
+    Xen_os.Eventchn.notify h nf.evtchn
+
   let _take_pages t n =
     (* returns the first n elements of l, and l without them, assumes than l is long enough *)
     let rec split_list l n acc = match n, l with
@@ -177,26 +182,27 @@ module Make(C: S.CONFIGURATION) = struct
       let pages = Io_page.to_pages (Io_page.get num) in (* TEMP: as we don't currently return pages, we need to allocate new pages each time *)
       List.iter
         (fun (gref, page) ->
-          let rec next () =
-            let id = nf.rx_id in
-            nf.rx_id <- (succ nf.rx_id) mod (1 lsl 16);
-            if Hashtbl.mem nf.rx_map id then next () else id
-          in
-          let id = next () in
-          Export.grant_access ~domid:nf.backend_id ~writable:true gref page;
-          Hashtbl.add nf.rx_map id (gref, page);
-          let slot_id = Ring.Rpc.Front.next_req_id nf.rx_fring in
-          let slot = Ring.Rpc.Front.slot nf.rx_fring slot_id in
-          ignore(RX.Request.(write {id; gref = Gntref.to_int32 gref}) slot)
+           let rec next () =
+             let id = nf.rx_id in
+             nf.rx_id <- (succ nf.rx_id) mod (1 lsl 16);
+             if Hashtbl.mem nf.rx_map id then next () else id
+           in
+           let id = next () in
+           Export.grant_access ~domid:nf.backend_id ~writable:true gref page;
+           Hashtbl.add nf.rx_map id (gref, page);
+           let slot_id = Ring.Rpc.Front.next_req_id nf.rx_fring in
+           let slot = Ring.Rpc.Front.slot nf.rx_fring slot_id in
+           ignore(RX.Request.(write {id; gref = Gntref.to_int32 gref}) slot)
         ) (List.combine grefs pages);
       let should_notify = Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring in
       Log.debug (fun f -> f "[Frontend.RX] refill_requests: pushed %d requests, notify=%b" 
         num should_notify);
       if Ring.Rpc.Front.push_requests_and_check_notify nf.rx_fring
-      then Xen_os.Eventchn.notify h nf.evtchn;
+      then notify nf ();
       return ()
     else return ()
 
+  (* returns the Cstruct based on the page from the fragment *)
   let pop_rx_page nf frag =
     let id = frag.Assemble.id in
     let gref, page = Hashtbl.find nf.rx_map id in
@@ -218,7 +224,7 @@ module Make(C: S.CONFIGURATION) = struct
       if should_notify then begin
         Log.debug (fun f -> f "[Frontend.RX] Sending notification on evtchn %d" 
           (Xen_os.Eventchn.to_int nf.evtchn));
-        Xen_os.Eventchn.notify h nf.evtchn
+        notify nf ()
       end
     let get_evtchn nf = nf.evtchn
     let get_stats nf = nf.stats
@@ -272,7 +278,7 @@ module Make(C: S.CONFIGURATION) = struct
       if should_notify then begin
         Log.debug (fun f -> f "[Frontend.TX] Sending notification on evtchn %d" 
           (Xen_os.Eventchn.to_int nf.evtchn));
-        Xen_os.Eventchn.notify h nf.evtchn
+        notify nf ()
       end
     
     let release_fragments nf _fragments =
@@ -302,6 +308,7 @@ module Make(C: S.CONFIGURATION) = struct
   let listen nf ~header_size receive_callback =
     Receiver.listen nf.t ~header_size receive_callback
 
+  (* The Xenstore MAC address is colon separated, very helpfully *)
   let mac nf = nf.t.mac
   let mtu nf = nf.t.mtu
   let get_stats nf = nf.t.stats
