@@ -185,6 +185,10 @@ module Make(C: S.CONFIGURATION) = struct
     let post_receive _t = Lwt.return_unit
   end
 
+  (* We need [n] pages to send a packet to the frontend. The Ring.Back API
+     gives us all the requests that are available at once. Since we may need
+     fewer of this, stash them in the t.rx_reqs sequence.
+     Raises [Netback_shutdown] if the interface has been shut down. *)
   let get_n_grefs t n =
     let rec take seq = function
       | 0 -> []
@@ -213,6 +217,9 @@ module Make(C: S.CONFIGURATION) = struct
         end
       end
     in
+    (* We lock here so that we handle one frame at a time.
+       Otherwise, we might divide the free pages among lots of
+       waiters and deadlock. *)
     Lwt_mutex.with_lock t.get_free_mutex (fun () ->
       Log.debug (fun f -> f "[Backend.TX] get_n_grefs: acquired lock, starting");
       loop Xen_os.Activations.program_start

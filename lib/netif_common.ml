@@ -68,68 +68,51 @@ module Make_Receiver(Ops : RECEIVE_OPS) = struct
   let rx_poll t callback =
     let packets = Ops.read_packets t in
     Log.debug (fun f -> f "[RX] rx_poll: read %d packets" (List.length packets));
-    packets |> Lwt_list.iter_s (fun packet ->
+    (* CRITICAL: Wait for ALL callbacks to complete before returning.
+       Otherwise, the re-check in the main loop happens too early. *)
+    Lwt_list.iter_s (fun packet ->
       assemble_packet packet (Ops.get_page t) >>= fun data ->
       Stats.rx (Ops.get_stats t) (Int64.of_int packet.total_size);
       Log.debug (fun f -> f "[RX] Assembled packet size=%d, calling callback" packet.total_size);
-      Lwt.async (fun () ->
-              Log.debug (fun f -> f "[RX] Callback starting for packet size=%d" packet.total_size);
-              Lwt.catch
-                (fun () -> 
-                  callback data >>= fun () ->
-                  Log.debug (fun f -> f "[RX] Callback COMPLETED for packet size=%d" packet.total_size);
-                  Lwt.return_unit
-                )
-                (fun ex ->
-                  Log.err (fun f -> f "[RX] Callback FAILED with exception: %s" (Printexc.to_string ex));
-                  Lwt.return_unit
-                )
-            );
-      Lwt.return_unit
-    )
+      (* Wait for the callback to complete before processing next packet.
+         This ensures that write() is called before we do the re-check. *)
+      Log.debug (fun f -> f "[RX] Callback starting for packet size=%d" packet.total_size);
+      Lwt.catch
+        (fun () ->
+          callback data >>= fun () ->
+          Log.debug (fun f -> f "[RX] Callback COMPLETED for packet size=%d" packet.total_size);
+          Lwt.return_unit
+        )
+        (fun ex ->
+          Log.err (fun f -> f "[RX] Callback FAILED with exception: %s" (Printexc.to_string ex));
+          Lwt.return_unit
+        )
+    ) packets
   
   let listen t ~header_size:_ callback =
-(*
     let rec loop after =
       let evtchn = Ops.get_evtchn t in
+      (* Process all available packets and WAIT for callbacks to complete *)
       Log.debug (fun f -> f "[RX] Event received on evtchn %d, processing..." 
         (Xen_os.Eventchn.to_int evtchn));
       rx_poll t callback >>= fun () ->
+      (* Refill for frontend *)
       Ops.post_receive t >>= fun () ->
       Log.debug (fun f -> f "[RX] post_receive done, notifying if needed");
       Ops.notify_if_needed t;
-      Log.debug (fun f -> f "[RX] Waiting for next event on evtchn %d" 
-        (Xen_os.Eventchn.to_int evtchn));
-      Xen_os.Activations.after (Ops.get_evtchn t) after >>= loop
-    in
-    loop Xen_os.Activations.program_start
-*)
-    let rec loop_with_recheck after =
-      let evtchn = Ops.get_evtchn t in
-      
-      (* Process available packets *)
-      rx_poll t callback >>= fun () ->
-      
-      (* Refill/post-process *)
-      Ops.post_receive t >>= fun () ->
-      
-      (* Notify backend if needed *)
-      Ops.notify_if_needed t;
-      
-      (* CRITICAL: Check again for new packets to avoid race condition.
-         New packets might have arrived while we were processing. *)
+      (* Now that callbacks have completed, check if new packets arrived 
+         while we were processing. This handles the race condition. *)
       let new_packets = Ops.read_packets t in
       if List.length new_packets > 0 then begin
-        Log.debug (fun f -> f "[RX] Race detected: %d new packets arrived during processing, re-polling immediately" (List.length new_packets));
-        (* Don't wait, loop immediately to process the new packets *)
-        loop_with_recheck after
+        Log.debug (fun f -> f "[RX] Found %d new packets after processing, re-polling immediately" (List.length new_packets));
+        loop after
       end else begin
         Log.debug (fun f -> f "[RX] No new packets, waiting for event on evtchn %d" 
           (Xen_os.Eventchn.to_int evtchn));
-        Xen_os.Activations.after evtchn after >>= loop_with_recheck
+        Xen_os.Activations.after evtchn after >>= loop
       end
     in
-    loop_with_recheck Xen_os.Activations.program_start
+    loop Xen_os.Activations.program_start
 end
 
 module type TRANSMIT_OPS = sig
