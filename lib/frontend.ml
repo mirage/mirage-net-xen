@@ -88,6 +88,21 @@ module Make(C: S.CONFIGURATION) = struct
 
   let h = Xen_os.Eventchn.init ()
 
+  (* Process TX responses to free up space in the TX ring *)
+  let rec process_tx_responses nf =
+    Ring.Rpc.Front.ack_responses nf.tx_fring (fun slot ->
+      match TX.Response.read slot with
+      | { TX.Response.id; status = TX.Response.OKAY } ->
+          Log.debug (fun f -> f "[Frontend.TX] Response OK for id=%d" id)
+      | { TX.Response.id; status } ->
+          Log.warn (fun f -> f "[Frontend.TX] Response status=%s for id=%d" 
+            (match status with
+             | TX.Response.ERROR -> "ERROR"
+             | TX.Response.DROPPED -> "DROPPED"
+             | TX.Response.NULL -> "NULL"
+             | TX.Response.OKAY -> "OKAY") id)
+    )
+
   let plug_inner vif_id =
     let id = `Client vif_id in
     C.read_backend id >>= fun backend_conf ->
@@ -260,7 +275,13 @@ module Make(C: S.CONFIGURATION) = struct
         Xen_os.Eventchn.notify h nf.evtchn
       end
     
-    let release_fragments _nf _fragments =
+    let release_fragments nf _fragments =
+      (* CRITICAL: Process TX responses to free up ring space.
+         Without this, the TX ring fills up and blocks forever. *)
+      process_tx_responses nf;
+      (* Check if there's now free space *)
+      let free_slots = Ring.Rpc.Front.get_free_requests nf.tx_fring in
+      Log.debug (fun f -> f "[Frontend.TX] After processing responses: %d free slots" free_slots);      
       Lwt.return_unit
     
     let get_stats nf = nf.stats
