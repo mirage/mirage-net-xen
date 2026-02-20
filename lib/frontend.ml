@@ -89,7 +89,7 @@ module Make(C: S.CONFIGURATION) = struct
   let h = Xen_os.Eventchn.init ()
 
   (* Process TX responses to free up space in the TX ring *)
-  let rec process_tx_responses nf =
+  let process_tx_responses nf =
     Ring.Rpc.Front.ack_responses nf.tx_fring (fun slot ->
       match TX.Response.read slot with
       | { TX.Response.id; status = TX.Response.OKAY } ->

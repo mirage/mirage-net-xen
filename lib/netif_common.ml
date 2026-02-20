@@ -65,38 +65,99 @@ module type RECEIVE_OPS = sig
 end
 
 module Make_Receiver(Ops : RECEIVE_OPS) = struct
+
+  (* Callback tracking to prevent race conditions while maintaining parallelism.
+     We use Lwt.async for performance but track pending callbacks to ensure
+     we wait for all to complete before doing the re-check. *)
+  type t = {
+    mutable n : int;
+    c : unit Lwt_condition.t;
+    l : Lwt_mutex.t;
+  }
+
+  let create_tracker () = {
+    n = 0;
+    c = Lwt_condition.create ();
+    l = Lwt_mutex.create ();
+  }
+
+  let tracker = create_tracker ()
+
   let rx_poll t callback =
     let packets = Ops.read_packets t in
     Log.debug (fun f -> f "[RX] rx_poll: read %d packets" (List.length packets));
-    (* CRITICAL: Wait for ALL callbacks to complete before returning.
-       Otherwise, the re-check in the main loop happens too early. *)
-    Lwt_list.iter_s (fun packet ->
-      assemble_packet packet (Ops.get_page t) >>= fun data ->
-      Stats.rx (Ops.get_stats t) (Int64.of_int packet.total_size);
-      Log.debug (fun f -> f "[RX] Assembled packet size=%d, calling callback" packet.total_size);
-      (* Wait for the callback to complete before processing next packet.
-         This ensures that write() is called before we do the re-check. *)
-      Log.debug (fun f -> f "[RX] Callback starting for packet size=%d" packet.total_size);
-      Lwt.catch
-        (fun () ->
+    (* Process packets in parallel with Lwt.async, and track them with the lock semaphore
+       so we can wait for completion before re-checking. *)
+    packets |> List.iter (fun packet ->
+      (* Increment pending counter *)
+      Lwt_mutex.with_lock tracker.l (fun () ->
+        tracker.n <- tracker.n + 1;
+        Lwt.return_unit
+      ) |> ignore;
+      (* Launch callback in parallel *)
+      Lwt.async (fun () ->
+        Lwt.catch (fun () ->
+          assemble_packet packet (Ops.get_page t) >>= fun data ->
+          Stats.rx (Ops.get_stats t) (Int64.of_int packet.total_size);
+          Log.debug (fun f -> f "[RX] Callback starting for packet size=%d" packet.total_size);
+          (* Execute the callback *)
           callback data >>= fun () ->
           Log.debug (fun f -> f "[RX] Callback COMPLETED for packet size=%d" packet.total_size);
-          Lwt.return_unit
+          (* Decrement counter and signal *)
+          Lwt_mutex.with_lock tracker.l (fun () ->
+            tracker.n <- tracker.n - 1;
+            Lwt_condition.signal tracker.c ();
+            Lwt.return_unit
+          )
         )
         (fun ex ->
           Log.err (fun f -> f "[RX] Callback FAILED with exception: %s" (Printexc.to_string ex));
+          (* Decrement counter even on failure *)
+          Lwt_mutex.with_lock tracker.l (fun () ->
+            tracker.n <- tracker.n - 1;
+            Lwt_condition.signal tracker.c ();
+            Lwt.return_unit
+          ) >>= fun () ->
+           Lwt.return_unit
+         )
+      )
+    );
+    Lwt.return_unit
+
+  (* Wait for all pending callbacks to complete.
+     This is called AFTER rx_poll and BEFORE the re-check to prevent
+     the race condition where packets arrive during callback processing. *)
+  let wait_for_callbacks () =
+    let rec loop () =
+      Lwt_mutex.with_lock tracker.l (fun () ->
+        if tracker.n = 0 then
+          Lwt.return `Done
+        else
+          Lwt.return `Wait
+      ) >>= function
+      | `Done ->
+          Log.debug (fun f -> f "[RX] All callbacks completed");
           Lwt.return_unit
-        )
-    ) packets
-  
+      | `Wait ->
+          Log.debug (fun f -> f "[RX] Waiting for %d pending callbacks" tracker.n);
+          Lwt_condition.wait tracker.c >>= loop
+    in
+    loop ()
+
   let listen t ~header_size:_ callback =
     let rec loop after =
       let evtchn = Ops.get_evtchn t in
-      (* Process all available packets and WAIT for callbacks to complete *)
+      (* Process all available packets (launches callbacks with Lwt.async for performance) *)
       Log.debug (fun f -> f "[RX] Event received on evtchn %d, processing..." 
         (Xen_os.Eventchn.to_int evtchn));
       rx_poll t callback >>= fun () ->
-      (* Refill for frontend *)
+      (* CRITICAL: Wait for all callbacks to complete before continuing.
+         This prevents the race condition where:
+         1. Callbacks are still running
+         2. We do the re-check too early
+         3. We miss packets that were written during callback execution *)
+      wait_for_callbacks () >>= fun () ->
+      (* Post-processing (refill for frontend) *)
       Ops.post_receive t >>= fun () ->
       Log.debug (fun f -> f "[RX] post_receive done, notifying if needed");
       Ops.notify_if_needed t;
