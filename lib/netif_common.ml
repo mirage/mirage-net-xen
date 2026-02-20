@@ -89,11 +89,6 @@ module Make_Receiver(Ops : RECEIVE_OPS) = struct
     (* Process packets in parallel with Lwt.async, and track them with the lock semaphore
        so we can wait for completion before re-checking. *)
     packets |> List.iter (fun packet ->
-      (* Increment pending counter *)
-      Lwt_mutex.with_lock tracker.l (fun () ->
-        tracker.n <- tracker.n + 1;
-        Lwt.return_unit
-      ) |> ignore;
       (* Launch callback in parallel *)
       Lwt.async (fun () ->
         Lwt.catch (fun () ->
@@ -103,46 +98,15 @@ module Make_Receiver(Ops : RECEIVE_OPS) = struct
           (* Execute the callback *)
           callback data >>= fun () ->
           Log.debug (fun f -> f "[RX] Callback COMPLETED for packet size=%d" packet.total_size);
-          (* Decrement counter and signal *)
-          Lwt_mutex.with_lock tracker.l (fun () ->
-            tracker.n <- tracker.n - 1;
-            Lwt_condition.signal tracker.c ();
-            Lwt.return_unit
-          )
+          Lwt.return_unit
         )
         (fun ex ->
           Log.err (fun f -> f "[RX] Callback FAILED with exception: %s" (Printexc.to_string ex));
-          (* Decrement counter even on failure *)
-          Lwt_mutex.with_lock tracker.l (fun () ->
-            tracker.n <- tracker.n - 1;
-            Lwt_condition.signal tracker.c ();
-            Lwt.return_unit
-          ) >>= fun () ->
            Lwt.return_unit
          )
       )
     );
     Lwt.return_unit
-
-  (* Wait for all pending callbacks to complete.
-     This is called AFTER rx_poll and BEFORE the re-check to prevent
-     the race condition where packets arrive during callback processing. *)
-  let wait_for_callbacks () =
-    let rec loop () =
-      Lwt_mutex.with_lock tracker.l (fun () ->
-        if tracker.n = 0 then
-          Lwt.return `Done
-        else
-          Lwt.return `Wait
-      ) >>= function
-      | `Done ->
-          Log.debug (fun f -> f "[RX] All callbacks completed");
-          Lwt.return_unit
-      | `Wait ->
-          Log.debug (fun f -> f "[RX] Waiting for %d pending callbacks" tracker.n);
-          Lwt_condition.wait tracker.c >>= loop
-    in
-    loop ()
 
   let listen t ~header_size:_ callback =
     let rec loop after =
@@ -151,12 +115,12 @@ module Make_Receiver(Ops : RECEIVE_OPS) = struct
       Log.debug (fun f -> f "[RX] Event received on evtchn %d, processing..." 
         (Xen_os.Eventchn.to_int evtchn));
       rx_poll t callback >>= fun () ->
-      (* CRITICAL: Wait for all callbacks to complete before continuing.
+      (* CRITICAL: We need to Wait for all callbacks to complete before continuing.
          This prevents the race condition where:
          1. Callbacks are still running
          2. We do the re-check too early
          3. We miss packets that were written during callback execution *)
-      wait_for_callbacks () >>= fun () ->
+      (* wait_for_callbacks () >>= fun () -> *)
       (* Post-processing (refill for frontend) *)
       Ops.post_receive t >>= fun () ->
       Log.debug (fun f -> f "[RX] post_receive done, notifying if needed");
