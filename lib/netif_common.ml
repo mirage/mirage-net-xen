@@ -65,24 +65,6 @@ module type RECEIVE_OPS = sig
 end
 
 module Make_Receiver(Ops : RECEIVE_OPS) = struct
-
-  (* Callback tracking to prevent race conditions while maintaining parallelism.
-     We use Lwt.async for performance but track pending callbacks to ensure
-     we wait for all to complete before doing the re-check. *)
-  type t = {
-    mutable n : int;
-    c : unit Lwt_condition.t;
-    l : Lwt_mutex.t;
-  }
-
-  let create_tracker () = {
-    n = 0;
-    c = Lwt_condition.create ();
-    l = Lwt_mutex.create ();
-  }
-
-  let tracker = create_tracker ()
-
   let rx_poll t callback =
     let packets = Ops.read_packets t in
     Log.debug (fun f -> f "[RX] rx_poll: read %d packets" (List.length packets));
