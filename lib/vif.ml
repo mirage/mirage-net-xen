@@ -50,6 +50,7 @@ type grant_ops = {
 
 type transport = {
   kind: kind;
+  vif_id: int;
   peer_domid: int;
   mac: Macaddr.t;
   peer_mac: Macaddr.t option;
@@ -443,7 +444,10 @@ module Make(C: S.CONFIGURATION) = struct
   
   type nonrec t = t
   type nonrec transport = transport
-  
+
+  (** Set of active block devices *)
+  let devices : (int, t) Hashtbl.t = Hashtbl.create 1
+
   let create_frontend ~vif_id ~backend_id ~mac ~mtu =
     Log.info (fun f -> f "[Frontend] Creating: id=%d domid=%d" vif_id backend_id);
     
@@ -474,6 +478,7 @@ module Make(C: S.CONFIGURATION) = struct
     
     let transport = {
       kind = Frontend;
+      vif_id = vif_id;
       peer_domid = backend_id;
       mac; peer_mac = None; mtu;
       tx_ring; tx_gnt; tx_mutex = Lwt_mutex.create (); tx_pool = Some tx_pool;
@@ -509,6 +514,7 @@ module Make(C: S.CONFIGURATION) = struct
     
     let transport = {
       kind = Backend;
+      vif_id = device_id;
       peer_domid = frontend_id;
       mac; peer_mac = Some frontend_mac; mtu;
       tx_ring; tx_gnt = Gntref.of_int32 tx_ring_ref; tx_mutex = Lwt_mutex.create (); tx_pool = None;
@@ -540,6 +546,7 @@ module Make(C: S.CONFIGURATION) = struct
     
     C.wait_until_backend_connected backend_conf >>= fun () ->
     
+    (* packets are dropped until listen is called *)
     Log.info (fun f -> f "[Frontend] Connected to backend");
     
     return {
@@ -547,7 +554,32 @@ module Make(C: S.CONFIGURATION) = struct
       l = Lwt_mutex.create ();
       c = Lwt_condition.create ();
     }
-  
+
+  let connect id =
+    (* If [id] is an integer, use it. Otherwise, return an error message
+       which enumerates the available interfaces. *)
+    let id' =
+      try Some (int_of_string id) with _ -> None
+    in
+    match id' with
+    | Some id' -> begin
+        if Hashtbl.mem devices id' then
+          return (Hashtbl.find devices id')
+        else begin
+          Log.info (fun f -> f "connect %d" id');
+          plug_frontend id' >>= fun dev ->
+          Hashtbl.add devices id' dev;
+          return dev
+        end
+      end
+    | None ->
+      C.enumerate () >>= fun all ->
+      let msg =
+        Printf.sprintf "device %s not found (available = [ %s ])"
+          id (String.concat ", " all)
+      in
+      Lwt.fail_with msg
+
   let make_backend ~domid ~device_id =
     let id = `Server (domid, device_id) in
     
@@ -668,8 +700,27 @@ module Make(C: S.CONFIGURATION) = struct
     in
     loop Xen_os.Activations.program_start
   
+  let frontend_mac nf =
+    match nf.t.peer_mac with
+    | Some mac -> mac (* Only Backend has peer_mac *)
+    | None -> nf.t.mac
+
   let mac nf = nf.t.mac
   let mtu nf = nf.t.mtu
   let get_stats_counters nf = nf.t.stats
   let reset_stats_counters nf = Mirage_net.Stats.reset nf.t.stats
+
+  (* Unplug shouldn't block, although the Xen one might need to due
+     to Xenstore? XXX *)
+  let disconnect nf = 
+    match nf.t.kind, nf.t.tx_pool with
+    | Frontend, Some tx_pool ->
+      Log.info (fun f -> f "disconnect");
+      (* TODO: free pages still in [nf.t.rx_map] *)
+      Shared_page_pool.shutdown tx_pool;
+      Hashtbl.remove devices nf.t.vif_id;
+      return ()
+    | Frontend, None (* Should not exists, but we have an optional type *)
+    | Backend, _ -> (* what we need to do here? If the Backend disconnects, the client will lose its network interface... *)
+      failwith "disconnect"
 end
