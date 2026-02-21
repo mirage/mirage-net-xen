@@ -42,12 +42,6 @@ type 'a ring_side =
   | Front_ring of ('a, int) Ring.Rpc.Front.t * ('a, int) Lwt_ring.Front.t
   | Back_ring of ('a, int) Ring.Rpc.Back.t
 
-type grant_ops = {
-  get_tx_grants: int -> (Gntref.t * Io_page.t) list Lwt.t;
-  get_rx_grants: int -> (Gntref.t * Io_page.t) list Lwt.t;
-  release_grant: Gntref.t -> unit Lwt.t;
-}
-
 type transport = {
   kind: kind;
   vif_id: int;
@@ -70,13 +64,19 @@ type transport = {
   
   evtchn: Xen_os.Eventchn.t;
   stats: Mirage_net.stats;
-  grant_ops: grant_ops;
+}
+
+type grant_ops = {
+  get_tx_grants: transport -> int -> (Gntref.t * Io_page.t) list Lwt.t;
+  get_rx_grants: transport -> int -> (Gntref.t * Io_page.t) list Lwt.t;
+  release_grant: transport -> Gntref.t -> unit Lwt.t;
 }
 
 type t = {
   mutable t: transport;
   l: Lwt_mutex.t;
   c: unit Lwt_condition.t;
+  grant_ops: grant_ops;
 }
 
 let h = Xen_os.Eventchn.init ()
@@ -110,59 +110,6 @@ let backend_import_ring ~domid ~gntref ~idx_size name writable =
 (* ============================================================================
    GRANT MANAGEMENT
    ============================================================================ *)
-
-let frontend_grant_ops ~domid ~tx_pool:_(*TODO*) ~rx_map:_(*TODO*) ~free_pages_ref = {
-  get_tx_grants = (fun _n -> return []);
-  
-  get_rx_grants = (fun n ->
-    let pages = !free_pages_ref in
-    if List.length pages < n then (
-      Log.warn (fun f -> f "[Frontend] Not enough free pages for RX: need %d, have %d" 
-        n (List.length pages));
-      return []
-    ) else (
-      let to_grant, remaining = 
-        let rec take acc n = function
-          | [] -> (List.rev acc, [])
-          | _ when n = 0 -> (List.rev acc, pages)
-          | hd :: tl -> take (hd :: acc) (n - 1) tl
-        in
-        take [] n pages
-      in
-      free_pages_ref := remaining;
-      
-      Lwt_list.map_s (fun page ->
-        Export.get () >>= fun gnt ->
-        Export.grant_access ~domid ~writable:true gnt page;
-        return (gnt, page)
-      ) to_grant
-    )
-  );
-  
-  release_grant = (fun gnt -> Export.end_access ~release_ref:true gnt);
-}
-
-let backend_grant_ops ~domid ~rx_grants = {
-  get_tx_grants = (fun n ->
-    let rec take acc = function
-      | 0 -> return (List.rev acc)
-      | n ->
-          if Lwt_dllist.is_empty rx_grants then
-            return (List.rev acc)
-          else
-            let req = Lwt_dllist.take_l rx_grants in
-            let gnt = Gntref.of_int32 req.RX.Request.gref in
-            let grant = {Import.domid; ref = gnt} in
-            let mapping = Import.map_exn grant ~writable:true in
-            let page = Import.Local_mapping.to_buf mapping |> Io_page.to_pages |> List.hd in
-            take ((gnt, page) :: acc) (n - 1)
-    in
-    take [] n
-  );
-  
-  get_rx_grants = (fun _n -> return []);
-  release_grant = (fun _gnt -> Lwt.return_unit);
-}
 
 let backend_get_n_grefs t n =
   let rx_grants = Option.get t.rx_grants in
@@ -351,34 +298,55 @@ module Unified_TX_Ops = struct
 end
 
 module Unified_RX_Ops = struct
-  type nonrec t = transport
+  (* type nonrec t = t *)
   
-  let read_packets t =
-    match t.kind, t.rx_ring with
+  let read_packets nf =
+    match nf.t.kind, nf.t.rx_ring with
     | Frontend, Front_ring (fring, _) ->
         Assemble.RX_IO.read_packets ~ack_fn:(Ring.Rpc.Front.ack_responses fring)
     | Backend, Back_ring bring ->
         Assemble.TX_IO.read_packets ~ack_fn:(Ring.Rpc.Back.ack_requests bring)
     | _ -> []
   
-  let get_page t frag =
-    match t.kind with
+  (* Helper to clear a page (zero it out) *)
+  external unsafe_fill_bigstring : Io_page.t -> int -> int -> int -> unit = "caml_fill_bigstring" [@@noalloc]
+  
+  let return_page nf page =
+    (* Zero out the page before returning it to the pool for security *)
+    unsafe_fill_bigstring page 0 Io_page.page_size 0;
+    let before = List.length nf.t.free_pages in
+    nf.t.free_pages <- page :: nf.t.free_pages;
+    let after = List.length nf.t.free_pages in
+    Log.debug (fun f -> f "[Frontend.RX] return_page: free_pages %d -> %d" before after)
+  
+  let get_page nf frag =
+    match nf.t.kind with
     | Frontend ->
-        let rx_map = Option.get t.rx_map in
+        let rx_map = Option.get nf.t.rx_map in
         let id = frag.Assemble.id in
+        Log.debug (fun f -> f "[Frontend.RX] get_page: id=%d, free_pages=%d" id (List.length nf.t.free_pages));
+        
         let gref, page = Hashtbl.find rx_map id in
         let cs = Io_page.to_cstruct page in
+        
+        (* Copy the data BEFORE releasing the grant and returning the page *)
+        let data_copy = Cstruct.sub_copy cs 0 (Cstruct.length cs) in
+        
         Hashtbl.remove rx_map id;
         Export.end_access ~release_ref:true gref >>= fun () ->
-        Lwt.return cs
+        
+        (* Return the page to the free pool for reuse *)
+        return_page nf page;
+        
+        Lwt.return data_copy
     
     | Backend ->
-        let gnt = {Import.domid = t.peer_domid; ref = Gntref.of_int32 frag.Assemble.gref} in
+        let gnt = {Import.domid = nf.t.peer_domid; ref = Gntref.of_int32 frag.Assemble.gref} in
         Import.with_mapping gnt ~writable:false (fun mapping ->
           let cs = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
           let cpy = Cstruct.sub_copy cs 0 (Cstruct.length cs) in
           
-          (match t.tx_ring with
+          (match nf.t.tx_ring with
            | Back_ring bring ->
                let slot = Ring.Rpc.Back.(slot bring (next_res_id bring)) in
                let resp = {TX.Response.id = frag.id; status = TX.Response.OKAY} in
@@ -390,44 +358,51 @@ module Unified_RX_Ops = struct
         | Error (`Msg m) -> Lwt.fail_with m
         | Ok page -> Lwt.return page
   
-  let get_evtchn t = t.evtchn
-  let get_stats t = t.stats
+  let get_evtchn nf = nf.t.evtchn
+  let get_stats nf = nf.t.stats
   
-  let notify_if_needed t =
-    if Ring_ops.push_and_check_notify t.rx_ring then begin
+  let notify_if_needed nf =
+    if Ring_ops.push_and_check_notify nf.t.rx_ring then begin
       Log.debug (fun f -> f "[%s.RX] Sending notification"
-        (match t.kind with Frontend -> "Frontend" | Backend -> "Backend"));
-      Xen_os.Eventchn.notify h t.evtchn
+        (match nf.t.kind with Frontend -> "Frontend" | Backend -> "Backend"));
+      Xen_os.Eventchn.notify h nf.t.evtchn
     end
   
-  let post_receive t =
-    match t.kind with
+  let post_receive nf =
+    match nf.t.kind with
     | Frontend ->
-        let rx_map = Option.get t.rx_map in
-        let free_slots = Ring_ops.get_free_slots t.rx_ring in
+        let rx_map = Option.get nf.t.rx_map in
+        let free_slots = Ring_ops.get_free_slots nf.t.rx_ring in
         
         Log.debug (fun f -> f "[Frontend.RX] refill_requests: %d free slots available" free_slots);
         
         if free_slots > 0 then
-          t.grant_ops.get_rx_grants free_slots >>= fun grants ->
+          let available_pages = List.length nf.t.free_pages in
+          let to_refill = min free_slots available_pages in
+          Log.debug (fun f -> f "[Frontend.RX] refill_requests: have %d pages, will refill %d slots" 
+            available_pages to_refill);
           
-          Log.debug (fun f -> f "[Frontend.RX] Got %d grants, adding to ring" (List.length grants));
+          if to_refill > 0 then          
+            nf.grant_ops.get_rx_grants nf.t free_slots >>= fun grants ->
+            Log.debug (fun f -> f "[Frontend.RX] Got %d grants, adding to ring" (List.length grants));
           
-          List.iter (fun (gnt, page) ->
-            let id = t.rx_id in
-            t.rx_id <- (t.rx_id + 1) mod 65536;
-            Hashtbl.add rx_map id (gnt, page);
+            List.iter (fun (gnt, page) ->
+              let id = nf.t.rx_id in
+              nf.t.rx_id <- (nf.t.rx_id + 1) mod 65536;
+              Hashtbl.add rx_map id (gnt, page);
+              
+              match nf.t.rx_ring with
+              | Front_ring (fring, _) ->
+                  let slot = Ring.Rpc.Front.next_req_id fring |> Ring.Rpc.Front.slot fring in
+                  RX.Request.(write {RX.Request.id; gref = Gntref.to_int32 gnt}) slot 
+              | _ -> ()
+            ) grants;
             
-            match t.rx_ring with
-            | Front_ring (fring, _) ->
-                let slot = Ring.Rpc.Front.next_req_id fring |> Ring.Rpc.Front.slot fring in
-                RX.Request.(write {RX.Request.id; gref = Gntref.to_int32 gnt}) slot 
-            | _ -> ()
-          ) grants;
-          
-          Log.debug (fun f -> f "[Frontend.RX] refill_requests: pushed %d requests" (List.length grants));
-          
-          Lwt.return_unit
+            Log.debug (fun f -> f "[Frontend.RX] refill_requests: pushed %d requests" (List.length grants));
+            
+            Lwt.return_unit
+          else
+            Lwt.return_unit
         else
           Lwt.return_unit
     
@@ -471,11 +446,8 @@ module Make(C: S.CONFIGURATION) = struct
     
     let rx_map = Hashtbl.create 256 in
     let free_pages = Io_page.to_pages (Io_page.get 256) in
-    let free_pages_ref = ref free_pages in
-    
-    let grant_ops = frontend_grant_ops ~domid:backend_id ~tx_pool ~rx_map ~free_pages_ref in
     let stats = Mirage_net.Stats.create () in
-    
+
     let transport = {
       kind = Frontend;
       vif_id = vif_id;
@@ -483,7 +455,7 @@ module Make(C: S.CONFIGURATION) = struct
       mac; peer_mac = None; mtu;
       tx_ring; tx_gnt; tx_mutex = Lwt_mutex.create (); tx_pool = Some tx_pool;
       rx_ring; rx_gnt; rx_grants = None; rx_map = Some rx_map; rx_id = 0; free_pages;
-      evtchn; stats; grant_ops;
+      evtchn; stats;
     } in
     
     Log.info (fun f -> f "[Frontend] Transport created successfully");
@@ -509,7 +481,6 @@ module Make(C: S.CONFIGURATION) = struct
     Xen_os.Eventchn.unmask h channel;
     
     let rx_grants = Lwt_dllist.create () in
-    let grant_ops = backend_grant_ops ~domid:frontend_id ~rx_grants in
     let stats = Mirage_net.Stats.create () in
     
     let transport = {
@@ -519,7 +490,7 @@ module Make(C: S.CONFIGURATION) = struct
       mac; peer_mac = Some frontend_mac; mtu;
       tx_ring; tx_gnt = Gntref.of_int32 tx_ring_ref; tx_mutex = Lwt_mutex.create (); tx_pool = None;
       rx_ring; rx_gnt = Gntref.of_int32 rx_ring_ref; rx_grants = Some rx_grants; rx_map = None; rx_id = 0; free_pages = [];
-      evtchn = channel; stats; grant_ops;
+      evtchn = channel; stats;
     } in
     
     Log.info (fun f -> f "[Backend] Transport created successfully");
@@ -548,11 +519,43 @@ module Make(C: S.CONFIGURATION) = struct
     
     (* packets are dropped until listen is called *)
     Log.info (fun f -> f "[Frontend] Connected to backend");
-    
+
+    let get_tx_grants = fun _t _n -> return [] in
+  
+    let get_rx_grants = (fun t n ->
+      Log.debug (fun f -> f "[Frontend.get_rx_grants] BEFORE: free_pages points to list with %d pages" (List.length t.free_pages));
+      
+      if List.length t.free_pages < n then (
+        Log.warn (fun f -> f "[Frontend] Not enough free pages for RX: need %d, have %d" 
+          n (List.length t.free_pages));
+        return []
+      ) else (
+        let to_grant, remaining = 
+          let rec take acc n = function
+            | [] -> (List.rev acc, [])
+            | _ when n = 0 -> (List.rev acc, t.free_pages) (* TODO: really need to List.rev? *)
+            | hd :: tl -> take (hd :: acc) (n - 1) tl
+          in
+          take [] n t.free_pages
+        in
+        t.free_pages <- remaining;
+        Log.debug (fun f -> f "[Frontend.get_rx_grants] we consider now a grant list of %d pages and free_pages is %d pages" (List.length to_grant) (List.length t.free_pages));
+        
+        Lwt_list.map_s (fun page ->
+          Export.get () >>= fun gnt ->
+          Export.grant_access ~domid:backend_id ~writable:true gnt page;
+          return (gnt, page)
+        ) to_grant
+      )
+    ) in
+  
+    let release_grant = (fun _t gnt -> Export.end_access ~release_ref:true gnt) in
+
     return {
       t = transport;
       l = Lwt_mutex.create ();
       c = Lwt_condition.create ();
+      grant_ops = {get_tx_grants; get_rx_grants; release_grant; }
     }
 
   let connect id =
@@ -599,11 +602,35 @@ module Make(C: S.CONFIGURATION) = struct
     C.connect id >>= fun () ->
     
     Log.info (fun f -> f "[Backend] Connected to frontend");
-    
+
+    let get_tx_grants = (fun t n ->
+      let rec take rx_grants acc = function
+        | 0 -> return (List.rev acc)
+        | n ->
+            if Lwt_dllist.is_empty rx_grants then
+              return (List.rev acc)
+            else
+              let req = Lwt_dllist.take_l rx_grants in
+              let gnt = Gntref.of_int32 req.RX.Request.gref in
+              let grant = {Import.domid; ref = gnt} in
+              let mapping = Import.map_exn grant ~writable:true in
+              let page = Import.Local_mapping.to_buf mapping |> Io_page.to_pages |> List.hd in
+              take rx_grants ((gnt, page) :: acc) (n - 1)
+      in
+      match t.rx_grants with
+      | Some rx_grants ->
+        take rx_grants [] n
+      | None -> Lwt.return []
+    ) in
+  
+    let get_rx_grants = (fun _t _n -> return []) in
+    let release_grant = (fun _t _gnt -> Lwt.return_unit) in
+
     return {
       t = transport;
       l = Lwt_mutex.create ();
       c = Lwt_condition.create ();
+      grant_ops = {get_tx_grants; get_rx_grants; release_grant; }
     }
 
   let write nf ~size fillf =
@@ -671,11 +698,11 @@ module Make(C: S.CONFIGURATION) = struct
 
   let listen nf ~header_size:_(*TODO*) callback =
     let rec loop after =
-      let evtchn = Unified_RX_Ops.get_evtchn nf.t in
+      let evtchn = Unified_RX_Ops.get_evtchn nf in
       (* Process all available packets (launches callbacks with Lwt.async for performance) *)
       Log.debug (fun f -> f "[RX] Event received on evtchn %d, processing..." 
         (Xen_os.Eventchn.to_int evtchn));
-      rx_poll nf.t callback >>= fun () ->
+      rx_poll nf callback >>= fun () ->
       (* CRITICAL: We need to Wait for all callbacks to complete before continuing.
          This prevents the race condition where:
          1. Callbacks are still running
@@ -683,12 +710,12 @@ module Make(C: S.CONFIGURATION) = struct
          3. We miss packets that were written during callback execution *)
       (* wait_for_callbacks () >>= fun () -> *)
       (* Post-processing (refill for frontend) *)
-      Unified_RX_Ops.post_receive nf.t >>= fun () ->
+      Unified_RX_Ops.post_receive nf >>= fun () ->
       Log.debug (fun f -> f "[RX] post_receive done, notifying if needed");
-      Unified_RX_Ops.notify_if_needed nf.t;
+      Unified_RX_Ops.notify_if_needed nf;
       (* Now that callbacks have completed, check if new packets arrived 
          while we were processing. This handles the race condition. *)
-      let new_packets = Unified_RX_Ops.read_packets nf.t in
+      let new_packets = Unified_RX_Ops.read_packets nf in
       if List.length new_packets > 0 then begin
         Log.debug (fun f -> f "[RX] Found %d new packets after processing, re-polling immediately" (List.length new_packets));
         loop after
