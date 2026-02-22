@@ -108,6 +108,36 @@ let backend_import_ring ~domid ~gntref ~idx_size name writable =
   return (Back_ring bring, mapping)
 
 (* ============================================================================
+   RING OPERATIONS
+   ============================================================================ *)
+
+module Ring_ops = struct
+  let next_req_id = function
+    | Front_ring (fring, _) -> Ring.Rpc.Front.next_req_id fring
+    | Back_ring bring -> Ring.Rpc.Back.next_res_id bring 
+  
+  let slot = function
+    | Front_ring (fring, _) -> fun id -> Ring.Rpc.Front.slot fring id
+    | Back_ring bring -> fun id -> Ring.Rpc.Back.slot bring id
+  
+  let push_and_check_notify = function
+    | Front_ring (fring, _) -> Ring.Rpc.Front.push_requests_and_check_notify fring
+    | Back_ring bring -> Ring.Rpc.Back.push_responses_and_check_notify bring
+  
+  let ack = function
+    | Front_ring (fring, _) -> fun f -> Ring.Rpc.Front.ack_responses fring f
+    | Back_ring bring -> fun f -> Ring.Rpc.Back.ack_requests bring f
+  
+  let get_free_slots = function
+    | Front_ring (fring, _) -> Ring.Rpc.Front.get_free_requests fring
+    | Back_ring _bring -> failwith "Backend doesn't have free ring slots" (* unused *)
+  
+  let wait_for_free ring n = match ring with
+    | Front_ring (_, client) -> Lwt_ring.Front.wait_for_free client n
+    | Back_ring _ -> failwith "Backend doesn't wait for free ring slots" (* unused *)
+end
+
+(* ============================================================================
    GRANT MANAGEMENT
    ============================================================================ *)
 
@@ -127,15 +157,12 @@ let backend_get_n_grefs t n =
     else begin
       Log.debug (fun f -> f "[Backend.TX] Not enough grefs, acking requests from ring");
       
-      (match t.rx_ring with
-       | Back_ring bring ->
-           Ring.Rpc.Back.ack_requests bring (fun slot ->
-             let req = RX.Request.read slot in
-             Log.debug (fun f -> f "[Backend.TX] Got RX request: id=%d gref=%ld" 
-               req.RX.Request.id req.RX.Request.gref);
-             ignore(Lwt_dllist.add_r req rx_grants)
-           )
-       | _ -> ());
+      Ring_ops.ack t.rx_ring (fun slot ->
+        let req = RX.Request.read slot in
+        Log.debug (fun f -> f "[Backend.TX] Got RX request: id=%d gref=%ld" 
+          req.RX.Request.id req.RX.Request.gref);
+        ignore(Lwt_dllist.add_r req rx_grants)
+      );
       
       let new_n = Lwt_dllist.length rx_grants in
       Log.debug (fun f -> f "[Backend.TX] After acking: had %d, now have %d grefs" n' new_n);
@@ -153,42 +180,6 @@ let backend_get_n_grefs t n =
     (* Log.debug (fun f -> f "[Backend.TX] get_n_grefs: acquired lock, starting"); *)
     loop Xen_os.Activations.program_start
   (* ) *)
-
-(* ============================================================================
-   RING OPERATIONS
-   ============================================================================ *)
-
-module Ring_ops = struct
-  let next_req_id = function
-    | Front_ring (fring, _) -> Ring.Rpc.Front.next_req_id fring
-    | Back_ring _ -> failwith "Backend doesn't have request IDs"
-  
-  let slot = function
-    | Front_ring (fring, _) -> fun id -> Ring.Rpc.Front.slot fring id
-    | Back_ring bring -> fun id -> Ring.Rpc.Back.slot bring id
-  
-  let push_and_check_notify = function
-    | Front_ring (fring, _) -> Ring.Rpc.Front.push_requests_and_check_notify fring
-    | Back_ring bring -> Ring.Rpc.Back.push_responses_and_check_notify bring
-  
-  let ack = function
-    | Front_ring (fring, _) -> fun f -> Ring.Rpc.Front.ack_responses fring f
-    | Back_ring bring -> fun f -> Ring.Rpc.Back.ack_requests bring f
-  
-  let get_free_slots = function
-    | Front_ring (fring, _) -> Ring.Rpc.Front.get_free_requests fring
-    | Back_ring _bring -> 
-        (* TODO
-        let req_prod = Ring.Rpc.Back.get_req_prod bring in
-        let req_cons = Ring.Rpc.Back.get_req_cons bring in
-        256 - (req_prod - req_cons)
-        *)
-        256
-  
-  let wait_for_free ring n = match ring with
-    | Front_ring (_, client) -> Lwt_ring.Front.wait_for_free client n
-    | Back_ring _ -> Lwt.return_unit
-end
 
 (* ============================================================================
    TX/RX OPERATIONS
@@ -267,23 +258,15 @@ module Unified_TX_Ops = struct
     | Frontend ->
         Assemble.TX_IO.write_packet
           ~get_slot:(fun () ->
-            match t.tx_ring with
-            | Front_ring (fring, _) ->
-                let id = Ring.Rpc.Front.next_req_id fring in
-                Ring.Rpc.Front.slot fring id
-            | _ -> failwith "Frontend should have Front_ring"
-          )
+            let id = Ring_ops.next_req_id t.tx_ring in
+            Ring_ops.slot t.tx_ring id)
           ~packet
     
     | Backend ->
         Assemble.RX_IO.write_packet
           ~get_slot:(fun () ->
-            match t.rx_ring with
-            | Back_ring bring ->
-                let id = Ring.Rpc.Back.next_res_id bring in
-                Ring.Rpc.Back.slot bring id
-            | _ -> failwith "Backend should have Back_ring"
-          )
+            let id = Ring_ops.next_req_id t.rx_ring in
+            Ring_ops.slot t.rx_ring id)
           ~packet
   
   let notify_if_needed t =
@@ -301,12 +284,11 @@ module Unified_RX_Ops = struct
   (* type nonrec t = t *)
   
   let read_packets nf =
-    match nf.t.kind, nf.t.rx_ring with
-    | Frontend, Front_ring (fring, _) ->
-        Assemble.RX_IO.read_packets ~ack_fn:(Ring.Rpc.Front.ack_responses fring)
-    | Backend, Back_ring bring ->
-        Assemble.TX_IO.read_packets ~ack_fn:(Ring.Rpc.Back.ack_requests bring)
-    | _ -> []
+    match nf.t.kind with
+    | Frontend ->
+        Assemble.RX_IO.read_packets ~ack_fn:(Ring_ops.ack nf.t.rx_ring)
+    | Backend ->
+        Assemble.TX_IO.read_packets ~ack_fn:(Ring_ops.ack nf.t.rx_ring)
   
   (* Helper to clear a page (zero it out) *)
   external unsafe_fill_bigstring : Io_page.t -> int -> int -> int -> unit = "caml_fill_bigstring" [@@noalloc]
@@ -390,12 +372,9 @@ module Unified_RX_Ops = struct
               let id = nf.t.rx_id in
               nf.t.rx_id <- (nf.t.rx_id + 1) mod 65536;
               Hashtbl.add rx_map id (gnt, page);
-              
-              match nf.t.rx_ring with
-              | Front_ring (fring, _) ->
-                  let slot = Ring.Rpc.Front.next_req_id fring |> Ring.Rpc.Front.slot fring in
-                  RX.Request.(write {RX.Request.id; gref = Gntref.to_int32 gnt}) slot 
-              | _ -> ()
+              let id = Ring_ops.next_req_id nf.t.rx_ring in
+              let slot = Ring_ops.slot nf.t.rx_ring id in
+              RX.Request.(write {RX.Request.id; gref = Gntref.to_int32 gnt}) slot
             ) grants;
             
             Log.debug (fun f -> f "[Frontend.RX] refill_requests: pushed %d requests" (List.length grants));
