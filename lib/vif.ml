@@ -151,31 +151,31 @@ let backend_get_n_grefs t n =
   
   let rec loop after =
     let n' = Lwt_dllist.length rx_grants in
-    Log.debug (fun f -> f "[Backend.TX] get_n_grefs: need %d, have %d" n n');
+    (* Log.debug (fun f -> f "[Backend.TX] get_n_grefs: need %d, have %d" n n'); *)
     
     if n' >= n then return (take rx_grants n)
     else begin
-      Log.debug (fun f -> f "[Backend.TX] Not enough grefs, acking requests from ring");
+      (* Log.debug (fun f -> f "[Backend.TX] Not enough grefs, acking requests from ring"); *)
       
       Ring_ops.ack t.rx_ring (fun slot ->
         let req = RX.Request.read slot in
-        Log.debug (fun f -> f "[Backend.TX] Got RX request: id=%d gref=%ld" 
-          req.RX.Request.id req.RX.Request.gref);
+        (*Log.debug (fun f -> f "[Backend.TX] Got RX request: id=%d gref=%ld" 
+          req.RX.Request.id req.RX.Request.gref);*)
         ignore(Lwt_dllist.add_r req rx_grants)
       );
       
       let new_n = Lwt_dllist.length rx_grants in
-      Log.debug (fun f -> f "[Backend.TX] After acking: had %d, now have %d grefs" n' new_n);
+      (* Log.debug (fun f -> f "[Backend.TX] After acking: had %d, now have %d grefs" n' new_n); *)
       
       if new_n <> n' then
         loop after
       else begin
-        Log.debug (fun f -> f "[Backend.TX] No new grefs, waiting for event on channel");
+        (* Log.debug (fun f -> f "[Backend.TX] No new grefs, waiting for event on channel"); *)
         Xen_os.Activations.after t.evtchn after >>= loop
       end
     end
   in
-  Log.debug (fun f -> f "[Backend.TX] get_n_grefs: do not wait for lock, write already took it");
+  (* Log.debug (fun f -> f "[Backend.TX] get_n_grefs: do not wait for lock, write already took it"); *)
   (* Lwt_mutex.with_lock t.tx_mutex (fun () -> *)
     (* Log.debug (fun f -> f "[Backend.TX] get_n_grefs: acquired lock, starting"); *)
     loop Xen_os.Activations.program_start
@@ -196,10 +196,10 @@ module Unified_TX_Ops = struct
         let numneeded = Shared_page_pool.blocks_needed size in
         let tx_pool = Option.get t.tx_pool in
         
-        Log.debug (fun f -> f "[Frontend.TX] fragment_data: size=%d, need %d blocks" size numneeded);
+        (* Log.debug (fun f -> f "[Frontend.TX] fragment_data: size=%d, need %d blocks" size numneeded); *)
         
         Ring_ops.wait_for_free t.tx_ring numneeded >>= fun () ->
-        Log.debug (fun f -> f "[Frontend.TX] wait_for_free completed, proceeding with copy");
+        (* Log.debug (fun f -> f "[Frontend.TX] wait_for_free completed, proceeding with copy"); *)
         
         let rec copy_to_pages datav offset acc_frags = function
           | 0 -> return (List.rev acc_frags)
@@ -219,11 +219,11 @@ module Unified_TX_Ops = struct
     | Backend ->
         let pages_needed = max 1 @@ Io_page.round_to_page_size size / Io_page.page_size in
         
-        Log.debug (fun f -> f "[Backend.TX] fragment_data: size=%d, pages_needed=%d" size pages_needed);
+        (* Log.debug (fun f -> f "[Backend.TX] fragment_data: size=%d, pages_needed=%d" size pages_needed); *)
         
         backend_get_n_grefs t pages_needed >>= fun reqs ->
         
-        Log.debug (fun f -> f "[Backend.TX] Got %d grant refs, mapping and copying" (List.length reqs));
+        (* Log.debug (fun f -> f "[Backend.TX] Got %d grant refs, mapping and copying" (List.length reqs)); *)
         
         let rec map_and_copy src offset acc_frags = function
           | [] -> return (List.rev acc_frags)
@@ -271,8 +271,8 @@ module Unified_TX_Ops = struct
   
   let notify_if_needed t =
     if Ring_ops.push_and_check_notify t.tx_ring then begin
-      Log.debug (fun f -> f "[%s.TX] Sending notification"
-        (match t.kind with Frontend -> "Frontend" | Backend -> "Backend"));
+      (*Log.debug (fun f -> f "[%s.TX] Sending notification"
+        (match t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
       Xen_os.Eventchn.notify h t.evtchn
     end
   
@@ -296,17 +296,18 @@ module Unified_RX_Ops = struct
   let return_page nf page =
     (* Zero out the page before returning it to the pool for security *)
     unsafe_fill_bigstring page 0 Io_page.page_size 0;
-    let before = List.length nf.t.free_pages in
+    (* let before = List.length nf.t.free_pages in *)
     nf.t.free_pages <- page :: nf.t.free_pages;
-    let after = List.length nf.t.free_pages in
-    Log.debug (fun f -> f "[Frontend.RX] return_page: free_pages %d -> %d" before after)
-  
+    (* let after = List.length nf.t.free_pages in *)
+    (* Log.debug (fun f -> f "[Frontend.RX] return_page: free_pages %d -> %d" before after); *)
+    ()
+
   let get_page nf frag =
     match nf.t.kind with
     | Frontend ->
         let rx_map = Option.get nf.t.rx_map in
         let id = frag.Assemble.id in
-        Log.debug (fun f -> f "[Frontend.RX] get_page: id=%d, free_pages=%d" id (List.length nf.t.free_pages));
+        (* Log.debug (fun f -> f "[Frontend.RX] get_page: id=%d, free_pages=%d" id (List.length nf.t.free_pages)); *)
         
         let gref, page = Hashtbl.find rx_map id in
         let cs = Io_page.to_cstruct page in
@@ -345,8 +346,8 @@ module Unified_RX_Ops = struct
   
   let notify_if_needed nf =
     if Ring_ops.push_and_check_notify nf.t.rx_ring then begin
-      Log.debug (fun f -> f "[%s.RX] Sending notification"
-        (match nf.t.kind with Frontend -> "Frontend" | Backend -> "Backend"));
+      (*Log.debug (fun f -> f "[%s.RX] Sending notification"
+        (match nf.t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
       Xen_os.Eventchn.notify h nf.t.evtchn
     end
   
@@ -356,17 +357,17 @@ module Unified_RX_Ops = struct
         let rx_map = Option.get nf.t.rx_map in
         let free_slots = Ring_ops.get_free_slots nf.t.rx_ring in
         
-        Log.debug (fun f -> f "[Frontend.RX] refill_requests: %d free slots available" free_slots);
+        (* Log.debug (fun f -> f "[Frontend.RX] refill_requests: %d free slots available" free_slots); *)
         
         if free_slots > 0 then
           let available_pages = List.length nf.t.free_pages in
           let to_refill = min free_slots available_pages in
-          Log.debug (fun f -> f "[Frontend.RX] refill_requests: have %d pages, will refill %d slots" 
-            available_pages to_refill);
+          (*Log.debug (fun f -> f "[Frontend.RX] refill_requests: have %d pages, will refill %d slots" 
+            available_pages to_refill);*)
           
           if to_refill > 0 then
             nf.grant_ops.get_rx_grants nf.t to_refill >>= fun grants ->
-            Log.debug (fun f -> f "[Frontend.RX] Got %d grants, adding to ring" (List.length grants));
+            (* Log.debug (fun f -> f "[Frontend.RX] Got %d grants, adding to ring" (List.length grants)); *)
           
             List.iter (fun (gnt, page) ->
               let id = nf.t.rx_id in
@@ -377,7 +378,7 @@ module Unified_RX_Ops = struct
               RX.Request.(write {RX.Request.id; gref = Gntref.to_int32 gnt}) slot
             ) grants;
             
-            Log.debug (fun f -> f "[Frontend.RX] refill_requests: pushed %d requests" (List.length grants));
+            (* Log.debug (fun f -> f "[Frontend.RX] refill_requests: pushed %d requests" (List.length grants)); *)
             
             Lwt.return_unit
           else
@@ -502,7 +503,7 @@ module Make(C: S.CONFIGURATION) = struct
     let get_tx_grants = fun _t _n -> return [] in
   
     let get_rx_grants = (fun t n ->
-      Log.debug (fun f -> f "[Frontend.get_rx_grants] BEFORE: free_pages points to list with %d pages" (List.length t.free_pages));
+      (* Log.debug (fun f -> f "[Frontend.get_rx_grants] BEFORE: free_pages points to list with %d pages" (List.length t.free_pages)); *)
       
       if List.length t.free_pages < n then (
         Log.warn (fun f -> f "[Frontend] Not enough free pages for RX: need %d, have %d" 
@@ -518,7 +519,7 @@ module Make(C: S.CONFIGURATION) = struct
           take [] n t.free_pages
         in
         t.free_pages <- remaining;
-        Log.debug (fun f -> f "[Frontend.get_rx_grants] we consider now a grant list of %d pages and free_pages is %d pages" (List.length to_grant) (List.length t.free_pages));
+        (* Log.debug (fun f -> f "[Frontend.get_rx_grants] we consider now a grant list of %d pages and free_pages is %d pages" (List.length to_grant) (List.length t.free_pages)); *)
         
         Lwt_list.map_s (fun page ->
           Export.get () >>= fun gnt ->
@@ -619,19 +620,19 @@ module Make(C: S.CONFIGURATION) = struct
     let buf = Cstruct.sub data 0 len in
     Lwt_mutex.with_lock nf.t.tx_mutex (fun () ->
       let total_size = Cstruct.length buf in
-      Log.debug (fun f -> f "[TX] write: starting, buf size=%d" total_size);
+      (* Log.debug (fun f -> f "[TX] write: starting, buf size=%d" total_size); *)
       Unified_TX_Ops.fragment_data nf.t buf >>= fun fragments ->
       let frags_only = List.map fst fragments in
-      Log.debug (fun f -> f "[TX] Fragmented into %d fragments" (List.length fragments));
+      (* Log.debug (fun f -> f "[TX] Fragmented into %d fragments" (List.length fragments)); *)
       let packet = Assemble.{
         total_size;
         fragments = frags_only;
       } in
-      Log.debug (fun f -> f "[TX] Writing packet to ring, total_size=%d" total_size);
+      (* Log.debug (fun f -> f "[TX] Writing packet to ring, total_size=%d" total_size); *)
       Unified_TX_Ops.write_packet_to_ring nf.t packet;
-      Log.debug (fun f -> f "[TX] Notifying if needed");
+      (* Log.debug (fun f -> f "[TX] Notifying if needed"); *)
       Unified_TX_Ops.notify_if_needed nf.t;
-      Log.debug (fun f -> f "[TX] Notification done, releasing fragments");
+      (* Log.debug (fun f -> f "[TX] Notification done, releasing fragments"); *)
       Stats.tx (Unified_TX_Ops.get_stats nf.t) (Int64.of_int total_size);
       Unified_TX_Ops.release_fragments nf.t fragments
     ) >|= fun () -> Ok ()
@@ -652,7 +653,7 @@ module Make(C: S.CONFIGURATION) = struct
 
   let rx_poll t callback =
     let packets = Unified_RX_Ops.read_packets t in
-    Log.debug (fun f -> f "[RX] rx_poll: read %d packets" (List.length packets));
+    (* Log.debug (fun f -> f "[RX] rx_poll: read %d packets" (List.length packets)); *)
     (* Process packets in parallel with Lwt.async, and track them with the lock semaphore
        so we can wait for completion before re-checking. *)
     packets |> List.iter (fun packet ->
@@ -661,10 +662,10 @@ module Make(C: S.CONFIGURATION) = struct
         Lwt.catch (fun () ->
           assemble_packet packet (Unified_RX_Ops.get_page t) >>= fun data ->
           Stats.rx (Unified_RX_Ops.get_stats t) (Int64.of_int packet.total_size);
-          Log.debug (fun f -> f "[RX] Callback starting for packet size=%d" packet.total_size);
+          (* Log.debug (fun f -> f "[RX] Callback starting for packet size=%d" packet.total_size); *)
           (* Execute the callback *)
           callback data >>= fun () ->
-          Log.debug (fun f -> f "[RX] Callback COMPLETED for packet size=%d" packet.total_size);
+          (* Log.debug (fun f -> f "[RX] Callback COMPLETED for packet size=%d" packet.total_size); *)
           Lwt.return_unit
         )
         (fun ex ->
@@ -679,8 +680,8 @@ module Make(C: S.CONFIGURATION) = struct
     let rec loop after =
       let evtchn = Unified_RX_Ops.get_evtchn nf in
       (* Process all available packets (launches callbacks with Lwt.async for performance) *)
-      Log.debug (fun f -> f "[RX] Event received on evtchn %d, processing..." 
-        (Xen_os.Eventchn.to_int evtchn));
+      (* Log.debug (fun f -> f "[RX] Event received on evtchn %d, processing..."
+        (Xen_os.Eventchn.to_int evtchn));*)
       rx_poll nf callback >>= fun () ->
       (* CRITICAL: We need to Wait for all callbacks to complete before continuing.
          This prevents the race condition where:
@@ -690,17 +691,17 @@ module Make(C: S.CONFIGURATION) = struct
       (* wait_for_callbacks () >>= fun () -> *)
       (* Post-processing (refill for frontend) *)
       Unified_RX_Ops.post_receive nf >>= fun () ->
-      Log.debug (fun f -> f "[RX] post_receive done, notifying if needed");
+      (* Log.debug (fun f -> f "[RX] post_receive done, notifying if needed"); *)
       Unified_RX_Ops.notify_if_needed nf;
       (* Now that callbacks have completed, check if new packets arrived 
          while we were processing. This handles the race condition. *)
       let new_packets = Unified_RX_Ops.read_packets nf in
       if List.length new_packets > 0 then begin
-        Log.debug (fun f -> f "[RX] Found %d new packets after processing, re-polling immediately" (List.length new_packets));
+        (* Log.debug (fun f -> f "[RX] Found %d new packets after processing, re-polling immediately" (List.length new_packets)); *)
         loop after
       end else begin
-        Log.debug (fun f -> f "[RX] No new packets, waiting for event on evtchn %d" 
-          (Xen_os.Eventchn.to_int evtchn));
+        (*Log.debug (fun f -> f "[RX] No new packets, waiting for event on evtchn %d" 
+          (Xen_os.Eventchn.to_int evtchn));*)
         Xen_os.Activations.after evtchn after >>= loop
       end
     in
