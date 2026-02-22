@@ -288,21 +288,7 @@ module Unified_RX_Ops = struct
     | Frontend ->
         Assemble.RX_IO.read_packets ~ack_fn:(Ring_ops.ack nf.t.rx_ring)
     | Backend ->
-      (* Check if ring has requests before reading *)
-      match nf.t.rx_ring with
-      | Back_ring bring ->
-          if Ring.Rpc.Back.more_to_do bring then begin
-            Log.debug (fun f -> f "[Backend.RX] Ring has unconsumed requests, reading...");
-            try
-              Assemble.TX_IO.read_packets ~ack_fn:(Ring_ops.ack nf.t.rx_ring)
-            with exn ->
-              Log.err (fun f -> f "[Backend.RX] Error reading packets: %s" (Printexc.to_string exn));
-              []
-          end else begin
-            Log.debug (fun f -> f "[Backend.RX] Ring is empty, skipping read");
-            []
-          end
-      | _ -> []
+        Assemble.TX_IO.read_packets ~ack_fn:(Ring_ops.ack nf.t.tx_ring)
   
   (* Helper to clear a page (zero it out) *)
   external unsafe_fill_bigstring : Io_page.t -> int -> int -> int -> unit = "caml_fill_bigstring" [@@noalloc]
