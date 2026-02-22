@@ -364,8 +364,8 @@ module Unified_RX_Ops = struct
           Log.debug (fun f -> f "[Frontend.RX] refill_requests: have %d pages, will refill %d slots" 
             available_pages to_refill);
           
-          if to_refill > 0 then          
-            nf.grant_ops.get_rx_grants nf.t free_slots >>= fun grants ->
+          if to_refill > 0 then
+            nf.grant_ops.get_rx_grants nf.t to_refill >>= fun grants ->
             Log.debug (fun f -> f "[Frontend.RX] Got %d grants, adding to ring" (List.length grants));
           
             List.iter (fun (gnt, page) ->
