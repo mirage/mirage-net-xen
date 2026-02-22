@@ -148,11 +148,11 @@ let backend_get_n_grefs t n =
       end
     end
   in
-  
-  Lwt_mutex.with_lock t.tx_mutex (fun () ->
-    Log.debug (fun f -> f "[Backend.TX] get_n_grefs: acquired lock, starting");
+  Log.debug (fun f -> f "[Backend.TX] get_n_grefs: do not wait for lock, write already took it");
+  (* Lwt_mutex.with_lock t.tx_mutex (fun () -> *)
+    (* Log.debug (fun f -> f "[Backend.TX] get_n_grefs: acquired lock, starting"); *)
     loop Xen_os.Activations.program_start
-  )
+  (* ) *)
 
 (* ============================================================================
    RING OPERATIONS
