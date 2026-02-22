@@ -116,7 +116,7 @@ module Make_Reader(Msg : MESSAGE)(Size : SIZE_STRATEGY) = struct
     
     ack_fn (fun slot ->
       match Msg.read slot with
-      | Error e -> Logs.warn (fun f -> f "[%s] Bad msg: %s" Size.name e)
+      | Error e -> Log.warn (fun f -> f "[%s] Bad msg: %s" Size.name e)
       | Ok msg -> messages := msg :: !messages
     );
     let result = List.rev !messages in
