@@ -270,11 +270,19 @@ module Unified_TX_Ops = struct
           ~packet
   
   let notify_if_needed t =
-    if Ring_ops.push_and_check_notify t.tx_ring then begin
-      (*Log.debug (fun f -> f "[%s.TX] Sending notification"
-        (match t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
-      Xen_os.Eventchn.notify h t.evtchn
-    end
+    match t.kind with
+      | Frontend ->
+        if Ring_ops.push_and_check_notify t.tx_ring then begin
+          (*Log.debug (fun f -> f "[%s.TX] Sending notification"
+            (match t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
+          Xen_os.Eventchn.notify h t.evtchn
+        end
+      | Backend ->
+        if Ring_ops.push_and_check_notify t.rx_ring then begin
+          (*Log.debug (fun f -> f "[%s.TX] Sending notification"
+            (match t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
+          Xen_os.Eventchn.notify h t.evtchn
+        end
   
   let release_fragments _t _fragments = Lwt.return_unit
   let get_stats t = t.stats
@@ -345,11 +353,19 @@ module Unified_RX_Ops = struct
   let get_stats nf = nf.t.stats
   
   let notify_if_needed nf =
-    if Ring_ops.push_and_check_notify nf.t.rx_ring then begin
-      (*Log.debug (fun f -> f "[%s.RX] Sending notification"
-        (match nf.t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
-      Xen_os.Eventchn.notify h nf.t.evtchn
-    end
+    match nf.t.kind with
+      | Frontend ->
+        if Ring_ops.push_and_check_notify nf.t.rx_ring then begin
+          (*Log.debug (fun f -> f "[%s.RX] Sending notification"
+            (match nf.t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
+          Xen_os.Eventchn.notify h nf.t.evtchn
+        end
+      | Backend ->
+        if Ring_ops.push_and_check_notify nf.t.tx_ring then begin
+          (*Log.debug (fun f -> f "[%s.RX] Sending notification"
+            (match nf.t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
+          Xen_os.Eventchn.notify h nf.t.evtchn
+        end
   
   let post_receive nf =
     match nf.t.kind with
