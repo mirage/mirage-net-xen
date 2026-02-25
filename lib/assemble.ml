@@ -166,7 +166,8 @@ module Make_Reader(Msg : MESSAGE)(Size : SIZE_STRATEGY) = struct
   let read_packets ack_fn =
     let messages = collect_messages ack_fn in
     let packets = group_into_packets messages in
-    Log.debug (fun f -> f "[%s.Reader] read_packets: %d messages -> %d packets" 
+    (* PA: that was debug before, maybe set it back to debug later *)
+    Log.warn (fun f -> f "[%s.Reader] read_packets: %d messages -> %d packets" 
       Size.name (List.length messages) (List.length packets));
     packets
 end
