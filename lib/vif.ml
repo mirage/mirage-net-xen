@@ -287,6 +287,7 @@ module Unified_TX_Ops = struct
     match t.kind with
       | Frontend ->
         if Ring_ops.push_and_check_notify t.tx_ring then begin
+          t.debug.tx_notifications <- t.debug.tx_notifications + 1;
           (*Log.debug (fun f -> f "[%s.TX] Sending notification"
             (match t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
           Xen_os.Eventchn.notify h t.evtchn
