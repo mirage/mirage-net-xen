@@ -402,7 +402,23 @@ module Unified_RX_Ops = struct
         else
           Lwt.return_unit
     
-    | Backend -> Lwt.return_unit
+    | Backend ->
+        let rx_grants = Option.get nf.t.rx_grants in
+        let before = Lwt_dllist.length rx_grants in
+        
+        Ring_ops.ack nf.t.rx_ring (fun slot ->
+          let req = RX.Request.read slot in
+          Log.info (fun f -> f "[Backend.post_receive] Got new RX grant from domU: id=%d gref=%ld" 
+            req.RX.Request.id req.RX.Request.gref);
+          ignore(Lwt_dllist.add_r req rx_grants)
+        );
+        
+        let after = Lwt_dllist.length rx_grants in
+        if after > before then
+          Log.info (fun f -> f "[Backend.post_receive] Refilled rx_grants: got %d new grants from domU (cache: %d -> %d)" 
+            (after - before) before after);
+        
+        Lwt.return_unit
 end
 
 (* ============================================================================
