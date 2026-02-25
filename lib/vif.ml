@@ -700,7 +700,6 @@ module Make(C: S.CONFIGURATION) = struct
         d.tx_calls d.tx_notifications d.rx_events d.rx_packets d.rx_slots_acked d.grants_taken d.grants_refilled)
     end;
 
-    Lwt_mutex.with_lock nf.t.tx_mutex (fun () ->
       (* Wait for space in TX ring before writing (Frontend only) *)
       (match nf.t.kind with
        | Frontend ->
@@ -719,6 +718,7 @@ module Make(C: S.CONFIGURATION) = struct
            Lwt.return_unit
       ) >>= fun () ->
 
+      Lwt_mutex.with_lock nf.t.tx_mutex (fun () ->
       let total_size = Cstruct.length buf in
       nf.t.debug.tx_fragments <- nf.t.debug.tx_fragments + 1;
       (* Log.debug (fun f -> f "[TX] write: starting, buf size=%d" total_size); *)
