@@ -706,14 +706,14 @@ module Make(C: S.CONFIGURATION) = struct
        | Frontend ->
             let free_before = Ring_ops.get_free_slots nf.t.tx_ring in
             Log.info (fun f -> f "[Frontend.TX] Before wait_for_free: %d free slots" free_before);
-            Ring_ops.wait_for_free nf.t.tx_ring 1
+            Ring_ops.wait_for_free nf.t.tx_ring 1 >>= fun () ->
             
             let free_after = Ring_ops.get_free_slots nf.t.tx_ring in
             Log.info (fun f -> f "[Frontend.TX] After wait_for_free: %d free slots" free_after);
             
             if free_after = 0 then
               Log.err (fun f -> f "[Frontend.TX] BUG: wait_for_free returned but ring still full!");
-            
+            Lwt.return_unit
        | Backend ->
            (* Backend doesn't need this - it uses domU RX ring *)
            Lwt.return_unit
