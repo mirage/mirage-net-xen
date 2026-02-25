@@ -700,23 +700,10 @@ module Make(C: S.CONFIGURATION) = struct
         d.tx_calls d.tx_notifications d.rx_events d.rx_packets d.rx_slots_acked d.grants_taken d.grants_refilled)
     end;
 
-    let rec wait_for_space () =
-      let free = Ring_ops.get_free_slots nf.t.tx_ring in
-      if free > 0 then
-        Lwt.return_unit
-      else begin
-        (* Ring full - wait for NetVM to consume *)
-        Log.warn (fun f -> f "[Frontend.TX] Ring full, waiting for space...");
-        Xen_os.Activations.after nf.t.evtchn Xen_os.Activations.program_start >>= fun _ ->
-        wait_for_space ()
-      end
-    in
-
     Lwt_mutex.with_lock nf.t.tx_mutex (fun () ->
       (* Wait for space in TX ring before writing (Frontend only) *)
       (match nf.t.kind with
-       | Frontend ->
-           wait_for_space ()
+       | Frontend -> Ring_ops.wait_for_free nf.t.tx_ring 1
        | Backend ->
            (* Backend doesn't need this - it uses domU RX ring *)
            Lwt.return_unit
