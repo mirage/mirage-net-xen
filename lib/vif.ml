@@ -709,7 +709,7 @@ module Make(C: S.CONFIGURATION) = struct
              Lwt.return_unit
            else begin
              (* Ring full - wait for NetVM to consume *)
-             Log.debug (fun f -> f "[Frontend.TX] Ring full, waiting for space...");
+             Log.warn (fun f -> f "[Frontend.TX] Ring full, waiting for space...");
              Xen_os.Activations.after nf.t.evtchn Xen_os.Activations.program_start >>= fun _ ->
              wait_for_space ()
            end
