@@ -153,6 +153,8 @@ let backend_get_n_grefs t n =
     let n' = Lwt_dllist.length rx_grants in
     (* Log.debug (fun f -> f "[Backend.TX] get_n_grefs: need %d, have %d" n n'); *)
     
+   if n' < 10 then
+     Log.warn (fun f -> f "[Backend.TX] WARNING: rx_grants is LOW: %d" n');
     if n' >= n then return (take rx_grants n)
     else begin
       (* Log.debug (fun f -> f "[Backend.TX] Not enough grefs, acking requests from ring"); *)
