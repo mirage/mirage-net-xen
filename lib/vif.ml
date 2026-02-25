@@ -50,6 +50,7 @@ type debug_counters = {
   mutable rx_packets: int;
   mutable grants_taken: int;
   mutable grants_refilled: int;
+  mutable rx_slots_acked: int;
 }
 
 type transport = {
@@ -310,7 +311,16 @@ module Unified_RX_Ops = struct
   let read_packets nf =
     match nf.t.kind with
     | Frontend ->
-        Assemble.RX_IO.read_packets ~ack_fn:(Ring_ops.ack nf.t.rx_ring)
+        (* Assemble.RX_IO.read_packets ~ack_fn:(Ring_ops.ack nf.t.rx_ring) *)
+        let acked = ref 0 in
+        let packets = Assemble.RX_IO.read_packets ~ack_fn:(fun f ->
+          Ring_ops.ack nf.t.rx_ring (fun slot ->
+            incr acked;
+            f slot
+          )
+        ) in
+        nf.t.debug.rx_slots_acked <- nf.t.debug.rx_slots_acked + !acked;
+        packets
     | Backend ->
         Assemble.TX_IO.read_packets ~ack_fn:(Ring_ops.ack nf.t.tx_ring)
   
@@ -448,6 +458,7 @@ let create_debug_counters () = {
   rx_packets = 0;
   grants_taken = 0;
   grants_refilled = 0;
+  rx_slots_acked = 0;
 }
 
 (* ============================================================================
@@ -685,8 +696,8 @@ module Make(C: S.CONFIGURATION) = struct
     nf.t.debug.tx_calls <- nf.t.debug.tx_calls + 1;
     if nf.t.debug.tx_calls mod 100 = 0 then begin
       let d = nf.t.debug in
-      Log.info (fun f -> f "[DEBUG] tx_calls=%d tx_notif=%d rx_events=%d rx_pkts=%d grants_taken=%d grants_refill=%d"
-        d.tx_calls d.tx_notifications d.rx_events d.rx_packets d.grants_taken d.grants_refilled)
+      Log.info (fun f -> f "[DEBUG] tx_calls=%d tx_notif=%d rx_events=%d rx_pkts=%d rx_acked=%d grants_taken=%d grants_refill=%d"
+        d.tx_calls d.tx_notifications d.rx_events d.rx_packets d.rx_slots_acked d.grants_taken d.grants_refilled)
     end;
 
     Lwt_mutex.with_lock nf.t.tx_mutex (fun () ->
