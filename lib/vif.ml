@@ -700,6 +700,26 @@ module Make(C: S.CONFIGURATION) = struct
         d.tx_calls d.tx_notifications d.rx_events d.rx_packets d.rx_slots_acked d.grants_taken d.grants_refilled)
     end;
 
+    (* Wait for space in TX ring before writing (Frontend only) *)
+    (match nf.t.kind with
+     | Frontend ->
+         let rec wait_for_space () =
+           let free = Ring_ops.get_free_slots nf.t.tx_ring in
+           if free > 0 then
+             Lwt.return_unit
+           else begin
+             (* Ring full - wait for NetVM to consume *)
+             Log.debug (fun f -> f "[Frontend.TX] Ring full, waiting for space...");
+             Xen_os.Activations.after nf.t.evtchn Xen_os.Activations.program_start >>= fun _ ->
+             wait_for_space ()
+           end
+         in
+         wait_for_space ()
+     | Backend ->
+         (* Backend doesn't need this - it uses domU RX ring *)
+         Lwt.return_unit
+    ) >>= fun () ->
+
     Lwt_mutex.with_lock nf.t.tx_mutex (fun () ->
       let total_size = Cstruct.length buf in
       nf.t.debug.tx_fragments <- nf.t.debug.tx_fragments + 1;
@@ -781,18 +801,9 @@ module Make(C: S.CONFIGURATION) = struct
       (* Now that callbacks have completed, check if new packets arrived 
          while we were processing. This handles the race condition. *)
 
-      (* TEST PA: don't loop immediatly ?
-      let new_packets = Unified_RX_Ops.read_packets nf in
-      nf.t.debug.rx_packets <- nf.t.debug.rx_packets + List.length new_packets;
-      if List.length new_packets > 0 then begin
-        (* Log.debug (fun f -> f "[RX] Found %d new packets after processing, re-polling immediately" (List.length new_packets)); *)
-        loop after
-      end else
-      *) begin
-        (*Log.debug (fun f -> f "[RX] No new packets, waiting for event on evtchn %d" 
-          (Xen_os.Eventchn.to_int evtchn));*)
-        Xen_os.Activations.after evtchn after >>= loop
-      end
+      (*Log.debug (fun f -> f "[RX] No new packets, waiting for event on evtchn %d" 
+        (Xen_os.Eventchn.to_int evtchn));*)
+      Xen_os.Activations.after evtchn after >>= loop
     in
     loop Xen_os.Activations.program_start
   
