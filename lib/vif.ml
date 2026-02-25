@@ -739,6 +739,7 @@ module Make(C: S.CONFIGURATION) = struct
     (* Log.debug (fun f -> f "[RX] rx_poll: read %d packets" (List.length packets)); *)
     (* Process packets in parallel with Lwt.async, and track them with the lock semaphore
        so we can wait for completion before re-checking. *)
+    t.t.debug.rx_packets <- t.t.debug.rx_packets + List.length packets;
     packets |> List.iter (fun packet ->
       (* Launch callback in parallel *)
       Lwt.async (fun () ->
@@ -779,12 +780,15 @@ module Make(C: S.CONFIGURATION) = struct
       Unified_RX_Ops.notify_if_needed nf;
       (* Now that callbacks have completed, check if new packets arrived 
          while we were processing. This handles the race condition. *)
+
+      (* TEST PA: don't loop immediatly ?
       let new_packets = Unified_RX_Ops.read_packets nf in
       nf.t.debug.rx_packets <- nf.t.debug.rx_packets + List.length new_packets;
       if List.length new_packets > 0 then begin
         (* Log.debug (fun f -> f "[RX] Found %d new packets after processing, re-polling immediately" (List.length new_packets)); *)
         loop after
-      end else begin
+      end else
+      *) begin
         (*Log.debug (fun f -> f "[RX] No new packets, waiting for event on evtchn %d" 
           (Xen_os.Eventchn.to_int evtchn));*)
         Xen_os.Activations.after evtchn after >>= loop
