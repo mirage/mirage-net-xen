@@ -166,8 +166,6 @@ let backend_get_n_grefs t n =
     let n' = Lwt_dllist.length rx_grants in
     (* Log.debug (fun f -> f "[Backend.TX] get_n_grefs: need %d, have %d" n n'); *)
     
-   if n' < 10 then
-     Log.warn (fun f -> f "[Backend.TX] WARNING: rx_grants is LOW: %d" n');
     if n' >= n then return (take rx_grants n)
     else begin
       (* Log.debug (fun f -> f "[Backend.TX] Not enough grefs, acking requests from ring"); *)
@@ -322,7 +320,15 @@ module Unified_RX_Ops = struct
         nf.t.debug.rx_slots_acked <- nf.t.debug.rx_slots_acked + !acked;
         packets
     | Backend ->
-        Assemble.TX_IO.read_packets ~ack_fn:(Ring_ops.ack nf.t.tx_ring)
+        let acked = ref 0 in
+        let packets = Assemble.TX_IO.read_packets ~ack_fn:(fun f ->
+          Ring_ops.ack nf.t.tx_ring (fun slot ->
+            incr acked;
+            f slot
+          )
+        ) in
+        nf.t.debug.rx_slots_acked <- nf.t.debug.rx_slots_acked + !acked;
+        packets
   
   (* Helper to clear a page (zero it out) *)
   external unsafe_fill_bigstring : Io_page.t -> int -> int -> int -> unit = "caml_fill_bigstring" [@@noalloc]
