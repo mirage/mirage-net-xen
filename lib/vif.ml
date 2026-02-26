@@ -791,10 +791,15 @@ module Make(C: S.CONFIGURATION) = struct
       (* Now that callbacks have completed, check if new packets arrived 
          while we were processing. This handles the race condition. *)
       (match nf.t.tx_ring with
-       | Front_ring (_, client) ->
+       | Front_ring (fring, _client) ->
+           Ring.Rpc.Front.ack_responses fring (fun _slot ->
+           (* Just ACK to free the slot, no waker to wake *)
+           ())
+(*
            Lwt_ring.Front.poll client (fun slot ->
              let resp = TX.Response.read slot in
              (resp.TX.Response.id, resp))
+*)
        | _ -> ());
    
       (*Log.debug (fun f -> f "[RX] No new packets, waiting for event on evtchn %d" 
