@@ -410,8 +410,8 @@ module Unified_RX_Ops = struct
         if free_slots > 0 then
           let available_pages = List.length nf.t.free_pages in
           let to_refill = min free_slots available_pages in
-          Log.warn (fun f -> f "[Frontend.RX] refill_requests: have %d pages, will refill %d slots" 
-            available_pages to_refill);
+          (*Log.warn (fun f -> f "[Frontend.RX] refill_requests: have %d pages, will refill %d slots" 
+            available_pages to_refill);*)
           
           if to_refill > 0 then
             nf.grant_ops.get_rx_grants nf.t to_refill >>= fun grants ->
