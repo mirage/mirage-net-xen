@@ -404,11 +404,12 @@ module Unified_RX_Ops = struct
         if free_slots > 0 then
           let available_pages = List.length nf.t.free_pages in
           let to_refill = min free_slots available_pages in
-          (*Log.debug (fun f -> f "[Frontend.RX] refill_requests: have %d pages, will refill %d slots" 
-            available_pages to_refill);*)
+          Log.debug (fun f -> f "[Frontend.RX] refill_requests: have %d pages, will refill %d slots" 
+            available_pages to_refill);
           
           if to_refill > 0 then
             nf.grant_ops.get_rx_grants nf.t to_refill >>= fun grants ->
+            (* Log.debug (fun f -> f "[Frontend.RX] Got %d grants, adding to ring" (List.length grants)); *)
           
             List.iter (fun (gnt, page) ->
               let id = nf.t.rx_id in
@@ -418,9 +419,6 @@ module Unified_RX_Ops = struct
               let slot = Ring_ops.slot nf.t.rx_ring id in
               RX.Request.(write {RX.Request.id; gref = Gntref.to_int32 gnt}) slot
             ) grants;
-            let new_free_slots = Ring_ops.get_free_slots nf.t.rx_ring in
-            Log.warn (fun f -> f "[Frontend.RX] Got %d grants, adding to ring, ring has now %d free slots" (List.length grants) new_free_slots);
-
             
             (* Log.debug (fun f -> f "[Frontend.RX] refill_requests: pushed %d requests" (List.length grants)); *)
             
