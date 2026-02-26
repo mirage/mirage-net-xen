@@ -42,6 +42,7 @@ type 'a ring_side =
   | Front_ring of ('a, int) Ring.Rpc.Front.t * ('a, int) Lwt_ring.Front.t
   | Back_ring of ('a, int) Ring.Rpc.Back.t
 
+(*
 type debug_counters = {
   mutable tx_calls: int;
   mutable tx_fragments: int;
@@ -52,6 +53,7 @@ type debug_counters = {
   mutable grants_refilled: int;
   mutable rx_slots_acked: int;
 }
+*)
 
 type transport = {
   kind: kind;
@@ -75,7 +77,7 @@ type transport = {
   
   evtchn: Xen_os.Eventchn.t;
   stats: Mirage_net.stats;
-  debug: debug_counters;
+  (* debug: debug_counters; *)
 }
 
 type grant_ops = {
@@ -161,7 +163,7 @@ let backend_get_n_grefs t n =
     | n -> Lwt_dllist.take_l seq :: (take seq (n - 1))
   in
   
-  t.debug.grants_taken <- t.debug.grants_taken + n;
+  (* t.debug.grants_taken <- t.debug.grants_taken + n; *)
   let rec loop after =
     let n' = Lwt_dllist.length rx_grants in
     (* Log.debug (fun f -> f "[Backend.TX] get_n_grefs: need %d, have %d" n n'); *)
@@ -286,14 +288,14 @@ module Unified_TX_Ops = struct
     match t.kind with
       | Frontend ->
         if Ring_ops.push_and_check_notify t.tx_ring then begin
-          t.debug.tx_notifications <- t.debug.tx_notifications + 1;
+          (* t.debug.tx_notifications <- t.debug.tx_notifications + 1; *)
           (*Log.debug (fun f -> f "[%s.TX] Sending notification"
             (match t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
           Xen_os.Eventchn.notify h t.evtchn
         end
       | Backend ->
         if Ring_ops.push_and_check_notify t.rx_ring then begin
-          t.debug.tx_notifications <- t.debug.tx_notifications + 1;
+          (* t.debug.tx_notifications <- t.debug.tx_notifications + 1; *)
           (*Log.debug (fun f -> f "[%s.TX] Sending notification"
             (match t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
           Xen_os.Eventchn.notify h t.evtchn
@@ -317,7 +319,7 @@ module Unified_RX_Ops = struct
             f slot
           )
         ) in
-        nf.t.debug.rx_slots_acked <- nf.t.debug.rx_slots_acked + !acked;
+        (* nf.t.debug.rx_slots_acked <- nf.t.debug.rx_slots_acked + !acked; *)
         packets
     | Backend ->
         let acked = ref 0 in
@@ -327,7 +329,7 @@ module Unified_RX_Ops = struct
             f slot
           )
         ) in
-        nf.t.debug.rx_slots_acked <- nf.t.debug.rx_slots_acked + !acked;
+        (* nf.t.debug.rx_slots_acked <- nf.t.debug.rx_slots_acked + !acked; *)
         packets
   
   (* Helper to clear a page (zero it out) *)
@@ -434,7 +436,7 @@ module Unified_RX_Ops = struct
     
     | Backend ->
         let rx_grants = Option.get nf.t.rx_grants in
-        let before = Lwt_dllist.length rx_grants in
+        (* let before = Lwt_dllist.length rx_grants in *)
         
         Ring_ops.ack nf.t.rx_ring (fun slot ->
           let req = RX.Request.read slot in
@@ -443,8 +445,8 @@ module Unified_RX_Ops = struct
           ignore(Lwt_dllist.add_r req rx_grants)
         );
         
-        let after = Lwt_dllist.length rx_grants in
-        nf.t.debug.grants_refilled <- nf.t.debug.grants_refilled + (after - before);
+        (* let after = Lwt_dllist.length rx_grants in *)
+        (* nf.t.debug.grants_refilled <- nf.t.debug.grants_refilled + (after - before); *)
         (*if after > before then
           Log.debug (fun f -> f "[Backend.post_receive] Refilled rx_grants: got %d new grants from domU (cache: %d -> %d)"
             (after - before) before after);
@@ -454,6 +456,7 @@ module Unified_RX_Ops = struct
 end
 
 
+(*
 let create_debug_counters () = {
   tx_calls = 0;
   tx_fragments = 0;
@@ -464,6 +467,7 @@ let create_debug_counters () = {
   grants_refilled = 0;
   rx_slots_acked = 0;
 }
+*)
 
 (* ============================================================================
    PUBLIC API
@@ -512,7 +516,7 @@ module Make(C: S.CONFIGURATION) = struct
       tx_ring; tx_gnt; tx_mutex = Lwt_mutex.create (); tx_pool = Some tx_pool;
       rx_ring; rx_gnt; rx_grants = None; rx_map = Some rx_map; rx_id = 0; free_pages;
       evtchn; stats;
-      debug = create_debug_counters();
+      (* debug = create_debug_counters(); *)
     } in
     
     Log.info (fun f -> f "[Frontend] Transport created successfully");
@@ -548,7 +552,7 @@ module Make(C: S.CONFIGURATION) = struct
       tx_ring; tx_gnt = Gntref.of_int32 tx_ring_ref; tx_mutex = Lwt_mutex.create (); tx_pool = None;
       rx_ring; rx_gnt = Gntref.of_int32 rx_ring_ref; rx_grants = Some rx_grants; rx_map = None; rx_id = 0; free_pages = [];
       evtchn = channel; stats;
-      debug = create_debug_counters();
+      (* debug = create_debug_counters(); *)
     } in
     
     Log.info (fun f -> f "[Backend] Transport created successfully");
@@ -697,6 +701,7 @@ module Make(C: S.CONFIGURATION) = struct
     if len > size then failwith "length exceeds total size";
     let buf = Cstruct.sub data 0 len in
 
+(*
     nf.t.debug.tx_calls <- nf.t.debug.tx_calls + 1;
     if nf.t.debug.tx_calls mod 100 = 0 then begin
       let d = nf.t.debug in
@@ -704,10 +709,11 @@ module Make(C: S.CONFIGURATION) = struct
         (match nf.t.kind with | Frontend -> "Frontend" | Backend -> "Backend")
         d.tx_calls d.tx_notifications d.rx_events d.rx_packets d.rx_slots_acked d.grants_taken d.grants_refilled)
     end;
+*)
 
     Lwt_mutex.with_lock nf.t.tx_mutex (fun () ->
       let total_size = Cstruct.length buf in
-      nf.t.debug.tx_fragments <- nf.t.debug.tx_fragments + 1;
+      (* nf.t.debug.tx_fragments <- nf.t.debug.tx_fragments + 1; *)
       (* Log.debug (fun f -> f "[TX] write: starting, buf size=%d" total_size); *)
       Unified_TX_Ops.fragment_data nf.t buf >>= fun fragments ->
       let frags_only = List.map fst fragments in
@@ -744,7 +750,7 @@ module Make(C: S.CONFIGURATION) = struct
     (* Log.debug (fun f -> f "[RX] rx_poll: read %d packets" (List.length packets)); *)
     (* Process packets in parallel with Lwt.async, and track them with the lock semaphore
        so we can wait for completion before re-checking. *)
-    t.t.debug.rx_packets <- t.t.debug.rx_packets + List.length packets;
+    (* t.t.debug.rx_packets <- t.t.debug.rx_packets + List.length packets; *)
     packets |> List.iter (fun packet ->
       (* Launch callback in parallel *)
       Lwt.async (fun () ->
@@ -768,7 +774,7 @@ module Make(C: S.CONFIGURATION) = struct
   let listen nf ~header_size:_(*TODO*) callback =
     let rec loop after =
       let evtchn = Unified_RX_Ops.get_evtchn nf in
-      nf.t.debug.rx_events <- nf.t.debug.rx_events + 1;
+      (* nf.t.debug.rx_events <- nf.t.debug.rx_events + 1; *)
       (* Process all available packets (launches callbacks with Lwt.async for performance) *)
       (* Log.debug (fun f -> f "[RX] Event received on evtchn %d, processing..."
         (Xen_os.Eventchn.to_int evtchn));*)
