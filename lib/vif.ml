@@ -696,7 +696,8 @@ module Make(C: S.CONFIGURATION) = struct
     nf.t.debug.tx_calls <- nf.t.debug.tx_calls + 1;
     if nf.t.debug.tx_calls mod 100 = 0 then begin
       let d = nf.t.debug in
-      Log.info (fun f -> f "[DEBUG] tx_calls=%d tx_notif=%d rx_events=%d rx_pkts=%d rx_acked=%d grants_taken=%d grants_refill=%d"
+      Log.info (fun f -> f "[DEBUG %s] tx_calls=%d tx_notif=%d rx_events=%d rx_pkts=%d rx_acked=%d grants_taken=%d grants_refill=%d"
+        (match nf.t.kind with | Frontend -> "Frontend" | Backend -> "Backend")
         d.tx_calls d.tx_notifications d.rx_events d.rx_packets d.rx_slots_acked d.grants_taken d.grants_refilled)
     end;
 
