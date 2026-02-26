@@ -609,12 +609,17 @@ module Make(C: S.CONFIGURATION) = struct
   
     let release_grant = (fun _t gnt -> Export.end_access ~release_ref:true gnt) in
 
-    return {
+    let nf = {
       t = transport;
       l = Lwt_mutex.create ();
       c = Lwt_condition.create ();
       grant_ops = {get_tx_grants; get_rx_grants; release_grant; }
-    }
+    } in
+
+    (* Make slots availables for the other side *)
+    Unified_RX_Ops.post_receive nf >>= fun () ->
+    Unified_RX_Ops.notify_if_needed nf;
+    return nf
 
   let connect id =
     (* If [id] is an integer, use it. Otherwise, return an error message
