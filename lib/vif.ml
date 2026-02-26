@@ -418,11 +418,9 @@ module Unified_RX_Ops = struct
             (* Log.debug (fun f -> f "[Frontend.RX] Got %d grants, adding to ring" (List.length grants)); *)
           
             List.iter (fun (gnt, page) ->
-              let id = nf.t.rx_id in
-              nf.t.rx_id <- (nf.t.rx_id + 1) mod 65536;
-              Hashtbl.add rx_map id (gnt, page);
               let id = Ring_ops.next_req_id nf.t.rx_ring in
               let slot = Ring_ops.slot nf.t.rx_ring id in
+              Hashtbl.add rx_map id (gnt, page);
               RX.Request.(write {RX.Request.id; gref = Gntref.to_int32 gnt}) slot
             ) grants;
             
@@ -747,9 +745,9 @@ module Make(C: S.CONFIGURATION) = struct
     (* Process packets in parallel with Lwt.async, and track them with the lock semaphore
        so we can wait for completion before re-checking. *)
     t.t.debug.rx_packets <- t.t.debug.rx_packets + List.length packets;
-    packets |> Lwt_list.iter_p (fun packet ->
+    packets |> List.iter (fun packet ->
       (* Launch callback in parallel *)
-      (* Lwt.async (fun () -> *)
+      Lwt.async (fun () ->
         Lwt.catch (fun () ->
           assemble_packet packet (Unified_RX_Ops.get_page t) >>= fun data ->
           Stats.rx (Unified_RX_Ops.get_stats t) (Int64.of_int packet.total_size);
@@ -764,8 +762,8 @@ module Make(C: S.CONFIGURATION) = struct
            Lwt.return_unit
          )
       )
-    (* ); *)
-    (* Lwt.return_unit *)
+    );
+    Lwt.return_unit
 
   let listen nf ~header_size:_(*TODO*) callback =
     let rec loop after =
