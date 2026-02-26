@@ -700,25 +700,7 @@ module Make(C: S.CONFIGURATION) = struct
         d.tx_calls d.tx_notifications d.rx_events d.rx_packets d.rx_slots_acked d.grants_taken d.grants_refilled)
     end;
 
-      (* Wait for space in TX ring before writing (Frontend only) *)
-      (match nf.t.kind with
-       | Frontend ->
-            let free_before = Ring_ops.get_free_slots nf.t.tx_ring in
-            Log.info (fun f -> f "[Frontend.TX] Before wait_for_free: %d free slots" free_before);
-            Ring_ops.wait_for_free nf.t.tx_ring 1 >>= fun () ->
-            
-            let free_after = Ring_ops.get_free_slots nf.t.tx_ring in
-            Log.info (fun f -> f "[Frontend.TX] After wait_for_free: %d free slots" free_after);
-            
-            if free_after = 0 then
-              Log.err (fun f -> f "[Frontend.TX] BUG: wait_for_free returned but ring still full!");
-            Lwt.return_unit
-       | Backend ->
-           (* Backend doesn't need this - it uses domU RX ring *)
-           Lwt.return_unit
-      ) >>= fun () ->
-
-      Lwt_mutex.with_lock nf.t.tx_mutex (fun () ->
+    Lwt_mutex.with_lock nf.t.tx_mutex (fun () ->
       let total_size = Cstruct.length buf in
       nf.t.debug.tx_fragments <- nf.t.debug.tx_fragments + 1;
       (* Log.debug (fun f -> f "[TX] write: starting, buf size=%d" total_size); *)
