@@ -747,9 +747,9 @@ module Make(C: S.CONFIGURATION) = struct
     (* Process packets in parallel with Lwt.async, and track them with the lock semaphore
        so we can wait for completion before re-checking. *)
     t.t.debug.rx_packets <- t.t.debug.rx_packets + List.length packets;
-    packets |> List.iter (fun packet ->
+    packets |> Lwt_list.iter_p (fun packet ->
       (* Launch callback in parallel *)
-      Lwt.async (fun () ->
+      (* Lwt.async (fun () -> *)
         Lwt.catch (fun () ->
           assemble_packet packet (Unified_RX_Ops.get_page t) >>= fun data ->
           Stats.rx (Unified_RX_Ops.get_stats t) (Int64.of_int packet.total_size);
@@ -764,8 +764,8 @@ module Make(C: S.CONFIGURATION) = struct
            Lwt.return_unit
          )
       )
-    );
-    Lwt.return_unit
+    (* ); *)
+    (* Lwt.return_unit *)
 
   let listen nf ~header_size:_(*TODO*) callback =
     let rec loop after =
