@@ -745,9 +745,16 @@ module Make(C: S.CONFIGURATION) = struct
       (* Wait for all TX responses before releasing (Frontend only) *)
       let releases = List.map (fun (_, _, release) -> release) fragments in
       (match nf.t.kind with
-       | Frontend -> Lwt.join releases
-       | Backend -> Lwt.return_unit) >>= fun () ->
-      Unified_TX_Ops.release_fragments nf.t []
+       | Frontend ->
+         (* Don't block - release in background to avoid init deadlock *)
+         Lwt.async (fun () ->
+           Lwt.join releases >>= fun () ->
+           Unified_TX_Ops.release_fragments nf.t []
+         );
+         Lwt.return ()
+       | Backend ->
+         Unified_TX_Ops.release_fragments nf.t []
+      )
     ) >|= fun () -> Ok ()
 
   let assemble_packet packet get_page_fn =
