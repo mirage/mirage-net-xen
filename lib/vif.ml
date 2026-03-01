@@ -334,7 +334,7 @@ module Unified_RX_Ops = struct
           if to_refill > 0 then
             nf.grant_ops.get_rx_grants nf.t to_refill >>= fun grants ->
             List.iter (fun (gnt, page) ->
-              let id = Ring_ops.next_req_id nf.t.rx_ring in
+              let id = Ring_ops.next_req_id nf.t.rx_ring mod (1 lsl 16) in (* IDs are uint16 *)
               let slot = Ring_ops.slot nf.t.rx_ring id in
               Hashtbl.add rx_map id (gnt, page);
               RX.Request.(write {RX.Request.id; gref = Gntref.to_int32 gnt}) slot
