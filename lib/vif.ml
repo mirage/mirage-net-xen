@@ -771,8 +771,8 @@ module Make(C: S.CONFIGURATION) = struct
     assert (!next = Cstruct.length data);
     data
 
-  let rx_poll t callback =
-    let packets = Unified_RX_Ops.read_packets t in
+  let rx_poll nf callback =
+    let packets = Unified_RX_Ops.read_packets nf in
     (* Log.debug (fun f -> f "[RX] rx_poll: read %d packets" (List.length packets)); *)
     (* Process packets in parallel with Lwt.async, and track them with the lock semaphore
        so we can wait for completion before re-checking. *)
@@ -781,13 +781,13 @@ module Make(C: S.CONFIGURATION) = struct
     packets |> Lwt_list.iter_s (fun packet ->
       Lwt.catch (fun () ->
         (* Assemble packet - pages returned HERE *)
-        assemble_packet packet (Unified_RX_Ops.get_page t) >>= fun data ->
-        Stats.rx (Unified_RX_Ops.get_stats t) (Int64.of_int packet.total_size);
+        assemble_packet packet (Unified_RX_Ops.get_page nf) >>= fun data ->
+        Stats.rx (Unified_RX_Ops.get_stats nf) (Int64.of_int packet.total_size);
         (* Pages now free - launch callback async *)
         Lwt.async (fun () -> callback data);
         Lwt.return_unit
       ) (fun ex ->
-        Log.err (fun f -> f "[RX] Callback FAILED with exception: %s" (Printexc.to_string ex));
+        Log.err (fun f -> f "[%s-RX] Callback FAILED with exception: %s" (match nf.t.kind with | Frontend -> "Frontend" | Backend -> "Backend") (Printexc.to_string ex));
         Lwt.return_unit
          )
       )
