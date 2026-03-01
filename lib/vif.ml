@@ -157,7 +157,7 @@ module Unified_TX_Ops = struct
     let size = Cstruct.length data in
     
     match t.kind with
-    | Frontend ->
+    | Frontend -> (* Note PA: we use t.kind, and later t.tx_ring can we remove t.kind and always compare to t.tx_ring and t.rx_ring? *)
         let numneeded = Shared_page_pool.blocks_needed size in
         let tx_pool = Option.get t.tx_pool in
         Ring_ops.wait_for_free t.tx_ring numneeded >>= fun () ->
