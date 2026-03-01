@@ -225,9 +225,20 @@ module Unified_TX_Ops = struct
                   id; offset = shared_block.Cstruct.off; size = len;
                   gref = Gntref.to_int32 gref;
                 } in
-                return ((datav', frag, Io_page.get 1), Lwt.return_unit)
-              ) >>= fun ((datav', frag, page), _) ->
-              copy_to_pages datav' (offset + frag.size) ((frag, page) :: acc_frags) (n - 1)
+                (* Write to ring using Lwt_ring.Front.write *)
+                (match t.tx_ring with
+                 | Front_ring (_, client) ->
+                     let request = { TX.Request.id; gref = Gntref.to_int32 gref;
+                                     offset = shared_block.Cstruct.off; flags = Flags.empty; size = len } in
+                     Lwt_ring.Front.write client (fun slot ->
+                       TX.Request.write request slot; id
+                     ) >>= fun replied ->
+                     let release = replied >|= fun _reply -> () in
+                     return ((datav', frag, Io_page.get 1), release)
+                 | _ ->
+                     return ((datav', frag, Io_page.get 1), Lwt.return_unit))
+              ) >>= fun ((datav', frag, page), release) ->
+              copy_to_pages datav' (offset + frag.size) ((frag, page, release) :: acc_frags) (n - 1)
         in
         copy_to_pages [data] 0 [] numneeded
     
@@ -263,20 +274,17 @@ module Unified_TX_Ops = struct
               let page = Import.Local_mapping.to_buf mapping in
               Import.Local_mapping.unmap_exn mapping;
               
-              map_and_copy src (offset + to_copy) ((frag, page) :: acc_frags) rest
+              map_and_copy src (offset + to_copy) ((frag, page, Lwt.return_unit) :: acc_frags) rest
         in
         
         map_and_copy data 0 [] reqs
   
   let write_packet_to_ring t packet =
+    (* Writing is now done in fragment_data via Lwt_ring.Front.write *)
+    (* This function is now a no-op for Frontend *)
     match t.kind with
     | Frontend ->
-        Assemble.TX_IO.write_packet
-          ~get_slot:(fun () ->
-            let id = Ring_ops.next_req_id t.tx_ring in
-            Ring_ops.slot t.tx_ring id)
-          ~packet
-    
+      ()
     | Backend ->
         Assemble.RX_IO.write_packet
           ~get_slot:(fun () ->
@@ -287,12 +295,18 @@ module Unified_TX_Ops = struct
   let notify_if_needed t =
     match t.kind with
       | Frontend ->
-        if Ring_ops.push_and_check_notify t.tx_ring then begin
-          (* t.debug.tx_notifications <- t.debug.tx_notifications + 1; *)
-          (*Log.debug (fun f -> f "[%s.TX] Sending notification"
-            (match t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
-          Xen_os.Eventchn.notify h t.evtchn
-        end
+        (* Use Lwt_ring.Front.push *)
+        (match t.tx_ring with
+         | Front_ring (_, client) ->
+             Lwt_ring.Front.push client (fun () -> Xen_os.Eventchn.notify h t.evtchn)
+         | _ ->
+           if Ring_ops.push_and_check_notify t.tx_ring then begin
+             (* t.debug.tx_notifications <- t.debug.tx_notifications + 1; *)
+             (*Log.debug (fun f -> f "[%s.TX] Sending notification"
+               (match t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
+             Xen_os.Eventchn.notify h t.evtchn
+           end
+        )
       | Backend ->
         if Ring_ops.push_and_check_notify t.rx_ring then begin
           (* t.debug.tx_notifications <- t.debug.tx_notifications + 1; *)
@@ -716,7 +730,7 @@ module Make(C: S.CONFIGURATION) = struct
       (* nf.t.debug.tx_fragments <- nf.t.debug.tx_fragments + 1; *)
       (* Log.debug (fun f -> f "[TX] write: starting, buf size=%d" total_size); *)
       Unified_TX_Ops.fragment_data nf.t buf >>= fun fragments ->
-      let frags_only = List.map fst fragments in
+      let frags_only = List.map (fun (frag, _, _) -> frag) fragments in
       (* Log.debug (fun f -> f "[TX] Fragmented into %d fragments" (List.length fragments)); *)
       let packet = Assemble.{
         total_size;
@@ -728,7 +742,12 @@ module Make(C: S.CONFIGURATION) = struct
       Unified_TX_Ops.notify_if_needed nf.t;
       (* Log.debug (fun f -> f "[TX] Notification done, releasing fragments"); *)
       Stats.tx (Unified_TX_Ops.get_stats nf.t) (Int64.of_int total_size);
-      Unified_TX_Ops.release_fragments nf.t fragments
+      (* Wait for all TX responses before releasing (Frontend only) *)
+      let releases = List.map (fun (_, _, release) -> release) fragments in
+      (match nf.t.kind with
+       | Frontend -> Lwt.join releases
+       | Backend -> Lwt.return_unit) >>= fun () ->
+      Unified_TX_Ops.release_fragments nf.t []
     ) >|= fun () -> Ok ()
 
   let assemble_packet packet get_page_fn =
