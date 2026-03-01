@@ -30,10 +30,6 @@ module Log = (val Logs.src_log src : Logs.LOG)
 
 let return = Lwt.return
 
-(* ============================================================================
-   TYPES
-   ============================================================================ *)
-
 type kind = 
   | Frontend
   | Backend
@@ -41,19 +37,6 @@ type kind =
 type 'a ring_side =
   | Front_ring of ('a, int) Ring.Rpc.Front.t * ('a, int) Lwt_ring.Front.t
   | Back_ring of ('a, int) Ring.Rpc.Back.t
-
-(*
-type debug_counters = {
-  mutable tx_calls: int;
-  mutable tx_fragments: int;
-  mutable tx_notifications: int;
-  mutable rx_events: int;
-  mutable rx_packets: int;
-  mutable grants_taken: int;
-  mutable grants_refilled: int;
-  mutable rx_slots_acked: int;
-}
-*)
 
 type transport = {
   kind: kind;
@@ -77,7 +60,6 @@ type transport = {
   
   evtchn: Xen_os.Eventchn.t;
   stats: Mirage_net.stats;
-  (* debug: debug_counters; *)
 }
 
 type grant_ops = {
@@ -94,10 +76,6 @@ type t = {
 }
 
 let h = Xen_os.Eventchn.init ()
-
-(* ============================================================================
-   RING CREATION
-   ============================================================================ *)
 
 let frontend_allocate_ring ~domid =
   let page = Io_page.get 1 in
@@ -120,10 +98,6 @@ let backend_import_ring ~domid ~gntref ~idx_size name writable =
   let sring = Ring.Rpc.of_buf_no_init ~buf ~idx_size ~name in
   let bring = Ring.Rpc.Back.init ~sring in
   return (Back_ring bring, mapping)
-
-(* ============================================================================
-   RING OPERATIONS
-   ============================================================================ *)
 
 module Ring_ops = struct
   let next_req_id = function
@@ -151,10 +125,6 @@ module Ring_ops = struct
     | Back_ring _ -> failwith "Backend doesn't wait for free ring slots" (* unused *)
 end
 
-(* ============================================================================
-   GRANT MANAGEMENT
-   ============================================================================ *)
-
 let backend_get_n_grefs t n =
   let rx_grants = Option.get t.rx_grants in
   let rec take seq = function
@@ -163,42 +133,22 @@ let backend_get_n_grefs t n =
     | n -> Lwt_dllist.take_l seq :: (take seq (n - 1))
   in
   
-  (* t.debug.grants_taken <- t.debug.grants_taken + n; *)
   let rec loop after =
     let n' = Lwt_dllist.length rx_grants in
-    (* Log.debug (fun f -> f "[Backend.TX] get_n_grefs: need %d, have %d" n n'); *)
-    
     if n' >= n then return (take rx_grants n)
     else begin
-      (* Log.debug (fun f -> f "[Backend.TX] Not enough grefs, acking requests from ring"); *)
-      
       Ring_ops.ack t.rx_ring (fun slot ->
         let req = RX.Request.read slot in
-        (*Log.debug (fun f -> f "[Backend.TX] Got RX request: id=%d gref=%ld" 
-          req.RX.Request.id req.RX.Request.gref);*)
         ignore(Lwt_dllist.add_r req rx_grants)
       );
-      
       let new_n = Lwt_dllist.length rx_grants in
-      (* Log.debug (fun f -> f "[Backend.TX] After acking: had %d, now have %d grefs" n' new_n); *)
-      
       if new_n <> n' then
         loop after
-      else begin
-        (* Log.debug (fun f -> f "[Backend.TX] No new grefs, waiting for event on channel"); *)
+      else
         Xen_os.Activations.after t.evtchn after >>= loop
-      end
     end
   in
-  (* Log.debug (fun f -> f "[Backend.TX] get_n_grefs: do not wait for lock, write already took it"); *)
-  (* Lwt_mutex.with_lock t.tx_mutex (fun () -> *)
-    (* Log.debug (fun f -> f "[Backend.TX] get_n_grefs: acquired lock, starting"); *)
-    loop Xen_os.Activations.program_start
-  (* ) *)
-
-(* ============================================================================
-   TX/RX OPERATIONS
-   ============================================================================ *)
+  loop Xen_os.Activations.program_start
 
 module Unified_TX_Ops = struct
   type nonrec t = transport
@@ -210,12 +160,8 @@ module Unified_TX_Ops = struct
     | Frontend ->
         let numneeded = Shared_page_pool.blocks_needed size in
         let tx_pool = Option.get t.tx_pool in
-        
-        (* Log.debug (fun f -> f "[Frontend.TX] fragment_data: size=%d, need %d blocks" size numneeded); *)
-        
         Ring_ops.wait_for_free t.tx_ring numneeded >>= fun () ->
-        (* Log.debug (fun f -> f "[Frontend.TX] wait_for_free completed, proceeding with copy"); *)
-        
+
         let rec copy_to_pages datav offset acc_frags = function
           | 0 -> return (List.rev acc_frags)
           | n ->
@@ -225,7 +171,6 @@ module Unified_TX_Ops = struct
                   id; offset = shared_block.Cstruct.off; size = len;
                   gref = Gntref.to_int32 gref;
                 } in
-                (* Write to ring using Lwt_ring.Front.write *)
                 (match t.tx_ring with
                  | Front_ring (_, client) ->
                      let request = { TX.Request.id; gref = Gntref.to_int32 gref;
@@ -244,41 +189,34 @@ module Unified_TX_Ops = struct
     
     | Backend ->
         let pages_needed = max 1 @@ Io_page.round_to_page_size size / Io_page.page_size in
-        
-        (* Log.debug (fun f -> f "[Backend.TX] fragment_data: size=%d, pages_needed=%d" size pages_needed); *)
-        
         backend_get_n_grefs t pages_needed >>= fun reqs ->
-        
-        (* Log.debug (fun f -> f "[Backend.TX] Got %d grant refs, mapping and copying" (List.length reqs)); *)
-        
+
         let rec map_and_copy src offset acc_frags = function
           | [] -> return (List.rev acc_frags)
           | req :: rest ->
               let gnt = {Import.domid = t.peer_domid; ref = Gntref.of_int32 req.RX.Request.gref} in
               let mapping = Import.map_exn gnt ~writable:true in
               let dst = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-              
+
+              (* Do we need that or can we set to 0 only [size,Cstruct.length dst]? *)
               Cstruct.memset dst 0;
-              
+
               let to_copy = min (Cstruct.length dst) (size - offset) in
               let src_part = Cstruct.sub src offset to_copy in
               Cstruct.blit src_part 0 dst 0 to_copy;
-              
+
               let frag = Assemble.{
                 id = req.RX.Request.id;
                 offset = 0;
                 size = to_copy;
                 gref = req.RX.Request.gref;
               } in
-              
               let page = Import.Local_mapping.to_buf mapping in
               Import.Local_mapping.unmap_exn mapping;
-              
               map_and_copy src (offset + to_copy) ((frag, page, Lwt.return_unit) :: acc_frags) rest
         in
-        
         map_and_copy data 0 [] reqs
-  
+
   let write_packet_to_ring t packet =
     (* Writing is now done in fragment_data via Lwt_ring.Front.write *)
     (* This function is now a no-op for Frontend *)
@@ -291,41 +229,29 @@ module Unified_TX_Ops = struct
             let id = Ring_ops.next_req_id t.rx_ring in
             Ring_ops.slot t.rx_ring id)
           ~packet
-  
+
   let notify_if_needed t =
     match t.kind with
       | Frontend ->
-        (* Use Lwt_ring.Front.push *)
         (match t.tx_ring with
          | Front_ring (_, client) ->
              Lwt_ring.Front.push client (fun () -> Xen_os.Eventchn.notify h t.evtchn)
          | _ ->
-           if Ring_ops.push_and_check_notify t.tx_ring then begin
-             (* t.debug.tx_notifications <- t.debug.tx_notifications + 1; *)
-             (*Log.debug (fun f -> f "[%s.TX] Sending notification"
-               (match t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
+           if Ring_ops.push_and_check_notify t.tx_ring then
              Xen_os.Eventchn.notify h t.evtchn
-           end
         )
       | Backend ->
-        if Ring_ops.push_and_check_notify t.rx_ring then begin
-          (* t.debug.tx_notifications <- t.debug.tx_notifications + 1; *)
-          (*Log.debug (fun f -> f "[%s.TX] Sending notification"
-            (match t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
+        if Ring_ops.push_and_check_notify t.rx_ring then
           Xen_os.Eventchn.notify h t.evtchn
-        end
-  
+
   let release_fragments _t _fragments = Lwt.return_unit
   let get_stats t = t.stats
 end
 
 module Unified_RX_Ops = struct
-  (* type nonrec t = t *)
-  
   let read_packets nf =
     match nf.t.kind with
     | Frontend ->
-        (* Assemble.RX_IO.read_packets ~ack_fn:(Ring_ops.ack nf.t.rx_ring) *)
         let acked = ref 0 in
         let packets = Assemble.RX_IO.read_packets ~ack_fn:(fun f ->
           Ring_ops.ack nf.t.rx_ring (fun slot ->
@@ -333,7 +259,6 @@ module Unified_RX_Ops = struct
             f slot
           )
         ) in
-        (* nf.t.debug.rx_slots_acked <- nf.t.debug.rx_slots_acked + !acked; *)
         packets
     | Backend ->
         let acked = ref 0 in
@@ -343,7 +268,6 @@ module Unified_RX_Ops = struct
             f slot
           )
         ) in
-        (* nf.t.debug.rx_slots_acked <- nf.t.debug.rx_slots_acked + !acked; *)
         packets
   
   (* Helper to clear a page (zero it out) *)
@@ -352,10 +276,7 @@ module Unified_RX_Ops = struct
   let return_page nf page =
     (* Zero out the page before returning it to the pool for security *)
     unsafe_fill_bigstring page 0 Io_page.page_size 0;
-    (* let before = List.length nf.t.free_pages in *)
     nf.t.free_pages <- page :: nf.t.free_pages;
-    (* let after = List.length nf.t.free_pages in *)
-    (* Log.debug (fun f -> f "[Frontend.RX] return_page: free_pages %d -> %d" before after); *)
     ()
 
   let get_page nf frag =
@@ -363,22 +284,16 @@ module Unified_RX_Ops = struct
     | Frontend ->
         let rx_map = Option.get nf.t.rx_map in
         let id = frag.Assemble.id in
-        (* Log.debug (fun f -> f "[Frontend.RX] get_page: id=%d, free_pages=%d" id (List.length nf.t.free_pages)); *)
-        
         let gref, page = Hashtbl.find rx_map id in
         let cs = Io_page.to_cstruct page in
-        
         (* Copy the data BEFORE releasing the grant and returning the page *)
         let data_copy = Cstruct.sub_copy cs 0 (Cstruct.length cs) in
-        
         Hashtbl.remove rx_map id;
         Export.end_access ~release_ref:true gref >>= fun () ->
-        
         (* Return the page to the free pool for reuse *)
         return_page nf page;
-        
         Lwt.return data_copy
-    
+
     | Backend ->
         let gnt = {Import.domid = nf.t.peer_domid; ref = Gntref.of_int32 frag.Assemble.gref} in
         Import.with_mapping gnt ~writable:false (fun mapping ->
@@ -391,57 +306,39 @@ module Unified_RX_Ops = struct
                let resp = {TX.Response.id = frag.id; status = TX.Response.OKAY} in
                TX.Response.write resp slot
            | _ -> ());
-          
           Lwt.return cpy
         ) >>= function
         | Error (`Msg m) -> Lwt.fail_with m
         | Ok page -> Lwt.return page
-  
+
   let get_evtchn nf = nf.t.evtchn
   let get_stats nf = nf.t.stats
-  
+
   let notify_if_needed nf =
     match nf.t.kind with
       | Frontend ->
-        if Ring_ops.push_and_check_notify nf.t.rx_ring then begin
-          (*Log.debug (fun f -> f "[%s.RX] Sending notification"
-            (match nf.t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
+        if Ring_ops.push_and_check_notify nf.t.rx_ring then
           Xen_os.Eventchn.notify h nf.t.evtchn
-        end
       | Backend ->
-        if Ring_ops.push_and_check_notify nf.t.tx_ring then begin
-          (*Log.debug (fun f -> f "[%s.RX] Sending notification"
-            (match nf.t.kind with Frontend -> "Frontend" | Backend -> "Backend"));*)
+        if Ring_ops.push_and_check_notify nf.t.tx_ring then
           Xen_os.Eventchn.notify h nf.t.evtchn
-        end
   
   let post_receive nf =
     match nf.t.kind with
     | Frontend ->
         let rx_map = Option.get nf.t.rx_map in
         let free_slots = Ring_ops.get_free_slots nf.t.rx_ring in
-        
-        (* Log.debug (fun f -> f "[Frontend.RX] refill_requests: %d free slots available" free_slots); *)
-        
         if free_slots > 0 then
           let available_pages = List.length nf.t.free_pages in
           let to_refill = min free_slots available_pages in
-          (*Log.warn (fun f -> f "[Frontend.RX] refill_requests: have %d pages, will refill %d slots" 
-            available_pages to_refill);*)
-          
           if to_refill > 0 then
             nf.grant_ops.get_rx_grants nf.t to_refill >>= fun grants ->
-            (* Log.debug (fun f -> f "[Frontend.RX] Got %d grants, adding to ring" (List.length grants)); *)
-          
             List.iter (fun (gnt, page) ->
               let id = Ring_ops.next_req_id nf.t.rx_ring in
               let slot = Ring_ops.slot nf.t.rx_ring id in
               Hashtbl.add rx_map id (gnt, page);
               RX.Request.(write {RX.Request.id; gref = Gntref.to_int32 gnt}) slot
             ) grants;
-            
-            (* Log.debug (fun f -> f "[Frontend.RX] refill_requests: pushed %d requests" (List.length grants)); *)
-            
             Lwt.return_unit
           else
             Lwt.return_unit
@@ -450,42 +347,12 @@ module Unified_RX_Ops = struct
     
     | Backend ->
         let rx_grants = Option.get nf.t.rx_grants in
-        (* let before = Lwt_dllist.length rx_grants in *)
-        
         Ring_ops.ack nf.t.rx_ring (fun slot ->
           let req = RX.Request.read slot in
-          (*Log.debug (fun f -> f "[Backend.post_receive] Got new RX grant from domU: id=%d gref=%ld"
-            req.RX.Request.id req.RX.Request.gref);*)
           ignore(Lwt_dllist.add_r req rx_grants)
         );
-        
-        (* let after = Lwt_dllist.length rx_grants in *)
-        (* nf.t.debug.grants_refilled <- nf.t.debug.grants_refilled + (after - before); *)
-        (*if after > before then
-          Log.debug (fun f -> f "[Backend.post_receive] Refilled rx_grants: got %d new grants from domU (cache: %d -> %d)"
-            (after - before) before after);
-        *)
-        
         Lwt.return_unit
 end
-
-
-(*
-let create_debug_counters () = {
-  tx_calls = 0;
-  tx_fragments = 0;
-  tx_notifications = 0;
-  rx_events = 0;
-  rx_packets = 0;
-  grants_taken = 0;
-  grants_refilled = 0;
-  rx_slots_acked = 0;
-}
-*)
-
-(* ============================================================================
-   PUBLIC API
-   ============================================================================ *)
 
 module Make(C: S.CONFIGURATION) = struct
   type error = Mirage_net.Net.error
@@ -499,29 +366,21 @@ module Make(C: S.CONFIGURATION) = struct
 
   let create_frontend ~vif_id ~backend_id ~mac ~mtu =
     Log.info (fun f -> f "[Frontend] Creating: id=%d domid=%d" vif_id backend_id);
-    
     frontend_create_ring ~domid:backend_id ~idx_size:TX.total_size 
       (Printf.sprintf "Netif.TX.%d" vif_id) 
     >>= fun (tx_gnt, tx_ring, _tx_page) ->
-    
     frontend_create_ring ~domid:backend_id ~idx_size:RX.total_size 
       (Printf.sprintf "Netif.RX.%d" vif_id) 
     >>= fun (rx_gnt, rx_ring, _rx_page) ->
-    
     let evtchn = Xen_os.Eventchn.bind_unbound_port h backend_id in
     let evtchn_port = Xen_os.Eventchn.to_int evtchn in
-    
     Log.info (fun f -> f "[Frontend] Event channel: %d" evtchn_port);
-    
     Xen_os.Eventchn.unmask h evtchn;
-    
     let grant_tx_page = Export.grant_access ~domid:backend_id ~writable:false in
     let tx_pool = Shared_page_pool.make grant_tx_page in
-    
     let rx_map = Hashtbl.create 256 in
     let free_pages = Io_page.to_pages (Io_page.get 256) in
     let stats = Mirage_net.Stats.create () in
-
     let transport = {
       kind = Frontend;
       vif_id = vif_id;
@@ -530,34 +389,24 @@ module Make(C: S.CONFIGURATION) = struct
       tx_ring; tx_gnt; tx_mutex = Lwt_mutex.create (); tx_pool = Some tx_pool;
       rx_ring; rx_gnt; rx_grants = None; rx_map = Some rx_map; rx_id = 0; free_pages;
       evtchn; stats;
-      (* debug = create_debug_counters(); *)
     } in
-    
     Log.info (fun f -> f "[Frontend] Transport created successfully");
     return transport
   
   let create_backend ~domid ~device_id ~frontend_mac ~mac ~mtu ~tx_ring_ref ~rx_ring_ref ~event_channel =
     Log.info (fun f -> f "[Backend] Creating: domid=%d device_id=%d" domid device_id);
-    
     let frontend_id = domid in
-    
     backend_import_ring ~domid:frontend_id ~gntref:(Gntref.of_int32 tx_ring_ref) 
       ~idx_size:TX.total_size "Netif.Backend.TX" true
     >>= fun (tx_ring, _tx_mapping) ->
-    
     backend_import_ring ~domid:frontend_id ~gntref:(Gntref.of_int32 rx_ring_ref) 
       ~idx_size:RX.total_size "Netif.Backend.RX" true
     >>= fun (rx_ring, _rx_mapping) ->
-    
     let channel = Xen_os.Eventchn.bind_interdomain h frontend_id (int_of_string event_channel) in
-    
     Log.info (fun f -> f "[Backend] Bound to event channel: %s" event_channel);
-    
     Xen_os.Eventchn.unmask h channel;
-    
     let rx_grants = Lwt_dllist.create () in
     let stats = Mirage_net.Stats.create () in
-    
     let transport = {
       kind = Backend;
       vif_id = device_id;
@@ -566,9 +415,7 @@ module Make(C: S.CONFIGURATION) = struct
       tx_ring; tx_gnt = Gntref.of_int32 tx_ring_ref; tx_mutex = Lwt_mutex.create (); tx_pool = None;
       rx_ring; rx_gnt = Gntref.of_int32 rx_ring_ref; rx_grants = Some rx_grants; rx_map = None; rx_id = 0; free_pages = [];
       evtchn = channel; stats;
-      (* debug = create_debug_counters(); *)
     } in
-    
     Log.info (fun f -> f "[Backend] Transport created successfully");
     return transport
   
@@ -576,12 +423,9 @@ module Make(C: S.CONFIGURATION) = struct
     let id = `Client vif_id in
     C.read_backend id >>= fun backend_conf ->
     let backend_id = backend_conf.S.backend_id in
-    
     C.read_frontend_mac id >>= fun mac ->
     C.read_mtu id >>= fun mtu ->
-    
     create_frontend ~vif_id ~backend_id ~mac ~mtu >>= fun transport ->
-    
     let front_conf = { S.
       tx_ring_ref = Gntref.to_int32 transport.tx_gnt;
       rx_ring_ref = Gntref.to_int32 transport.rx_gnt;
@@ -590,17 +434,11 @@ module Make(C: S.CONFIGURATION) = struct
     } in
     C.write_frontend_configuration id front_conf >>= fun () ->
     C.connect id >>= fun () ->
-    
     C.wait_until_backend_connected backend_conf >>= fun () ->
-    
     (* packets are dropped until listen is called *)
     Log.info (fun f -> f "[Frontend] Connected to backend");
-
     let get_tx_grants = fun _t _n -> return [] in
-  
     let get_rx_grants = (fun t n ->
-      (* Log.debug (fun f -> f "[Frontend.get_rx_grants] BEFORE: free_pages points to list with %d pages" (List.length t.free_pages)); *)
-      
       if List.length t.free_pages < n then (
         Log.warn (fun f -> f "[Frontend] Not enough free pages for RX: need %d, have %d" 
           n (List.length t.free_pages));
@@ -615,8 +453,6 @@ module Make(C: S.CONFIGURATION) = struct
           take [] n t.free_pages
         in
         t.free_pages <- remaining;
-        (* Log.debug (fun f -> f "[Frontend.get_rx_grants] we consider now a grant list of %d pages and free_pages is %d pages" (List.length to_grant) (List.length t.free_pages)); *)
-        
         Lwt_list.map_s (fun page ->
           Export.get () >>= fun gnt ->
           Export.grant_access ~domid:backend_id ~writable:true gnt page;
@@ -624,9 +460,7 @@ module Make(C: S.CONFIGURATION) = struct
         ) to_grant
       )
     ) in
-  
     let release_grant = (fun _t gnt -> Export.end_access ~release_ref:true gnt) in
-
     return {
       t = transport;
       l = Lwt_mutex.create ();
@@ -661,24 +495,19 @@ module Make(C: S.CONFIGURATION) = struct
 
   let make_backend ~domid ~device_id =
     let id = `Server (domid, device_id) in
-    
     C.read_backend_mac id >>= fun mac ->
     C.read_frontend_mac id >>= fun frontend_mac ->
     C.init_backend id Features.supported >>= fun _backend_configuration(*TODO*) ->
     C.read_frontend_configuration id >>= fun f ->
     C.read_mtu id >>= fun mtu ->
-    
     create_backend 
       ~domid ~device_id ~frontend_mac ~mac ~mtu 
       ~tx_ring_ref:f.S.tx_ring_ref 
       ~rx_ring_ref:f.S.rx_ring_ref 
       ~event_channel:f.S.event_channel
     >>= fun transport ->
-    
     C.connect id >>= fun () ->
-    
     Log.info (fun f -> f "[Backend] Connected to frontend");
-
     let get_tx_grants = (fun t n ->
       let rec take rx_grants acc = function
         | 0 -> return (List.rev acc)
@@ -698,10 +527,8 @@ module Make(C: S.CONFIGURATION) = struct
         take rx_grants [] n
       | None -> Lwt.return []
     ) in
-  
     let get_rx_grants = (fun _t _n -> return []) in
     let release_grant = (fun _t _gnt -> Lwt.return_unit) in
-
     return {
       t = transport;
       l = Lwt_mutex.create ();
@@ -714,33 +541,16 @@ module Make(C: S.CONFIGURATION) = struct
     let len = fillf data in
     if len > size then failwith "length exceeds total size";
     let buf = Cstruct.sub data 0 len in
-
-(*
-    nf.t.debug.tx_calls <- nf.t.debug.tx_calls + 1;
-    if nf.t.debug.tx_calls mod 100 = 0 then begin
-      let d = nf.t.debug in
-      Log.info (fun f -> f "[DEBUG %s] tx_calls=%d tx_notif=%d rx_events=%d rx_pkts=%d rx_acked=%d grants_taken=%d grants_refill=%d"
-        (match nf.t.kind with | Frontend -> "Frontend" | Backend -> "Backend")
-        d.tx_calls d.tx_notifications d.rx_events d.rx_packets d.rx_slots_acked d.grants_taken d.grants_refilled)
-    end;
-*)
-
     Lwt_mutex.with_lock nf.t.tx_mutex (fun () ->
       let total_size = Cstruct.length buf in
-      (* nf.t.debug.tx_fragments <- nf.t.debug.tx_fragments + 1; *)
-      (* Log.debug (fun f -> f "[TX] write: starting, buf size=%d" total_size); *)
       Unified_TX_Ops.fragment_data nf.t buf >>= fun fragments ->
       let frags_only = List.map (fun (frag, _, _) -> frag) fragments in
-      (* Log.debug (fun f -> f "[TX] Fragmented into %d fragments" (List.length fragments)); *)
       let packet = Assemble.{
         total_size;
         fragments = frags_only;
       } in
-      (* Log.debug (fun f -> f "[TX] Writing packet to ring, total_size=%d" total_size); *)
       Unified_TX_Ops.write_packet_to_ring nf.t packet;
-      (* Log.debug (fun f -> f "[TX] Notifying if needed"); *)
       Unified_TX_Ops.notify_if_needed nf.t;
-      (* Log.debug (fun f -> f "[TX] Notification done, releasing fragments"); *)
       Stats.tx (Unified_TX_Ops.get_stats nf.t) (Int64.of_int total_size);
       (* Wait for all TX responses before releasing (Frontend only) *)
       let releases = List.map (fun (_, _, release) -> release) fragments in
@@ -773,10 +583,6 @@ module Make(C: S.CONFIGURATION) = struct
 
   let rx_poll nf callback =
     let packets = Unified_RX_Ops.read_packets nf in
-    (* Log.debug (fun f -> f "[RX] rx_poll: read %d packets" (List.length packets)); *)
-    (* Process packets in parallel with Lwt.async, and track them with the lock semaphore
-       so we can wait for completion before re-checking. *)
-    (* t.t.debug.rx_packets <- t.t.debug.rx_packets + List.length packets; *)
     (* Process packets sequentially, launch callback async AFTER (like legacy) *)
     packets |> Lwt_list.iter_s (fun packet ->
       Lwt.catch (fun () ->
@@ -795,37 +601,15 @@ module Make(C: S.CONFIGURATION) = struct
   let listen nf ~header_size:_(*TODO*) callback =
     let rec loop after =
       let evtchn = Unified_RX_Ops.get_evtchn nf in
-      (* nf.t.debug.rx_events <- nf.t.debug.rx_events + 1; *)
-      (* Process all available packets (launches callbacks with Lwt.async for performance) *)
-      (* Log.debug (fun f -> f "[RX] Event received on evtchn %d, processing..."
-        (Xen_os.Eventchn.to_int evtchn));*)
       rx_poll nf callback >>= fun () ->
-      (* CRITICAL: We need to Wait for all callbacks to complete before continuing.
-         This prevents the race condition where:
-         1. Callbacks are still running
-         2. We do the re-check too early
-         3. We miss packets that were written during callback execution *)
-      (* wait_for_callbacks () >>= fun () -> *)
-      (* Post-processing (refill for frontend) *)
       Unified_RX_Ops.post_receive nf >>= fun () ->
-      (* Log.debug (fun f -> f "[RX] post_receive done, notifying if needed"); *)
       Unified_RX_Ops.notify_if_needed nf;
-      (* Now that callbacks have completed, check if new packets arrived 
-         while we were processing. This handles the race condition. *)
       (match nf.t.tx_ring with
        | Front_ring (_fring, client) ->
-(*
-           Ring.Rpc.Front.ack_responses fring (fun _slot ->
-           (* Just ACK to free the slot, no waker to wake *)
-           ())
-*)
            Lwt_ring.Front.poll client (fun slot ->
              let resp = TX.Response.read slot in
              (resp.TX.Response.id, resp))
        | _ -> ());
-   
-      (*Log.debug (fun f -> f "[RX] No new packets, waiting for event on evtchn %d" 
-        (Xen_os.Eventchn.to_int evtchn));*)
       Xen_os.Activations.after evtchn after >>= loop
     in
     loop Xen_os.Activations.program_start
