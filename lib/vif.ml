@@ -206,11 +206,11 @@ module Unified_TX_Ops = struct
                        TX.Request.write request slot; id
                      ) >>= fun replied ->
                      let release = replied >|= fun _reply -> () in
-                     return ((datav', frag, Io_page.get 1), release)
+                     return ((datav', frag), release)
                  | _ ->
-                     return ((datav', frag, Io_page.get 1), Lwt.return_unit))
-              ) >>= fun ((datav', frag, page), release) ->
-              copy_to_pages datav' (offset + frag.size) ((frag, page, release) :: acc_frags) (n - 1)
+                     return ((datav', frag), Lwt.return_unit))
+              ) >>= fun ((datav', frag), release) ->
+              copy_to_pages datav' (offset + frag.size) ((frag, release) :: acc_frags) (n - 1)
         in
         copy_to_pages [data] 0 [] numneeded
     
@@ -248,9 +248,8 @@ module Unified_TX_Ops = struct
                                 size = Ok to_copy } in
                    RX.Response.write resp slot
                | _ -> assert false);
-              let page = Import.Local_mapping.to_buf mapping in
               Import.Local_mapping.unmap_exn mapping;
-              map_and_copy src (offset + to_copy) ((frag, page, Lwt.return_unit) :: acc_frags) rest
+              map_and_copy src (offset + to_copy) ((frag, Lwt.return_unit) :: acc_frags) rest
         in
         map_and_copy data 0 [] reqs
 
@@ -566,10 +565,10 @@ module Make(C: S.CONFIGURATION) = struct
     Lwt_mutex.with_lock nf.t.tx_mutex (fun () ->
       let total_size = Cstruct.length buf in
       Unified_TX_Ops.fragment_data nf.t buf >>= fun fragments ->
+      let releases = List.map (fun (_, release) -> release) fragments in
       Unified_TX_Ops.notify_if_needed nf.t;
       Stats.tx (Unified_TX_Ops.get_stats nf.t) (Int64.of_int total_size);
       (* Wait for all TX responses before releasing (Frontend only) *)
-      let releases = List.map (fun (_, _, release) -> release) fragments in
       (match nf.t.tx_pool with
        | Some _ -> (* Frontend *)
          (* Don't block - release in background to avoid init deadlock *)
