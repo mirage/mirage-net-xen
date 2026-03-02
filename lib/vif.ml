@@ -15,7 +15,9 @@
  * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- *
+ *)
+
+(*
  * Unified Xen network channel implementation for both frontend and backend.
  *)
 
@@ -30,16 +32,11 @@ module Log = (val Logs.src_log src : Logs.LOG)
 
 let return = Lwt.return
 
-type kind = 
-  | Frontend
-  | Backend
-
 type 'a ring_side =
   | Front_ring of ('a, int) Ring.Rpc.Front.t * ('a, int) Lwt_ring.Front.t
   | Back_ring of ('a, int) Ring.Rpc.Back.t
 
 type transport = {
-  kind: kind;
   vif_id: int;
   peer_domid: int;
   mac: Macaddr.t;
@@ -156,10 +153,9 @@ module Unified_TX_Ops = struct
   let fragment_data t data =
     let size = Cstruct.length data in
     
-    match t.kind with
-    | Frontend -> (* Note PA: we use t.kind, and later t.tx_ring can we remove t.kind and always compare to t.tx_ring and t.rx_ring? *)
+    match t.tx_pool with
+    | Some tx_pool -> (* Frontend *)
         let numneeded = Shared_page_pool.blocks_needed size in
-        let tx_pool = Option.get t.tx_pool in
         Ring_ops.wait_for_free t.tx_ring numneeded >>= fun () ->
 
         let rec copy_to_pages datav offset acc_frags = function
@@ -187,7 +183,7 @@ module Unified_TX_Ops = struct
         in
         copy_to_pages [data] 0 [] numneeded
     
-    | Backend ->
+    | None -> (* Backend *)
         let pages_needed = max 1 @@ Io_page.round_to_page_size size / Io_page.page_size in
         backend_get_n_grefs t pages_needed >>= fun reqs ->
 
@@ -220,10 +216,10 @@ module Unified_TX_Ops = struct
   let write_packet_to_ring t packet =
     (* Writing is now done in fragment_data via Lwt_ring.Front.write *)
     (* This function is now a no-op for Frontend *)
-    match t.kind with
-    | Frontend ->
+    match t.tx_pool with
+    | Some _ -> (* Frontend *)
       ()
-    | Backend ->
+    | None -> (* Backend *)
         Assemble.RX_IO.write_packet
           ~get_slot:(fun () ->
             let id = Ring_ops.next_req_id t.rx_ring in
@@ -231,18 +227,18 @@ module Unified_TX_Ops = struct
           ~packet
 
   let notify_if_needed t =
-    match t.kind with
-      | Frontend ->
-        (match t.tx_ring with
-         | Front_ring (_, client) ->
-             Lwt_ring.Front.push client (fun () -> Xen_os.Eventchn.notify h t.evtchn)
-         | _ ->
-           if Ring_ops.push_and_check_notify t.tx_ring then
-             Xen_os.Eventchn.notify h t.evtchn
-        )
-      | Backend ->
-        if Ring_ops.push_and_check_notify t.rx_ring then
-          Xen_os.Eventchn.notify h t.evtchn
+    match t.tx_pool with
+    | Some _ -> (* Frontend *)
+      (match t.tx_ring with
+       | Front_ring (_, client) ->
+           Lwt_ring.Front.push client (fun () -> Xen_os.Eventchn.notify h t.evtchn)
+       | _ ->
+         if Ring_ops.push_and_check_notify t.tx_ring then
+           Xen_os.Eventchn.notify h t.evtchn
+      )
+    | None -> (* Backend *)
+      if Ring_ops.push_and_check_notify t.rx_ring then
+        Xen_os.Eventchn.notify h t.evtchn
 
   let release_fragments _t _fragments = Lwt.return_unit
   let get_stats t = t.stats
@@ -250,25 +246,25 @@ end
 
 module Unified_RX_Ops = struct
   let read_packets nf =
-    match nf.t.kind with
-    | Frontend ->
-        let acked = ref 0 in
-        let packets = Assemble.RX_IO.read_packets ~ack_fn:(fun f ->
-          Ring_ops.ack nf.t.rx_ring (fun slot ->
-            incr acked;
-            f slot
-          )
-        ) in
-        packets
-    | Backend ->
-        let acked = ref 0 in
-        let packets = Assemble.TX_IO.read_packets ~ack_fn:(fun f ->
-          Ring_ops.ack nf.t.tx_ring (fun slot ->
-            incr acked;
-            f slot
-          )
-        ) in
-        packets
+    match nf.t.tx_pool with
+    | Some _ -> (* Frontend *)
+      let acked = ref 0 in
+      let packets = Assemble.RX_IO.read_packets ~ack_fn:(fun f ->
+        Ring_ops.ack nf.t.rx_ring (fun slot ->
+          incr acked;
+          f slot
+        )
+      ) in
+      packets
+    | None -> (* Backend *)
+      let acked = ref 0 in
+      let packets = Assemble.TX_IO.read_packets ~ack_fn:(fun f ->
+        Ring_ops.ack nf.t.tx_ring (fun slot ->
+          incr acked;
+          f slot
+        )
+      ) in
+      packets
   
   (* Helper to clear a page (zero it out) *)
   external unsafe_fill_bigstring : Io_page.t -> int -> int -> int -> unit = "caml_fill_bigstring" [@@noalloc]
@@ -280,78 +276,78 @@ module Unified_RX_Ops = struct
     ()
 
   let get_page nf frag =
-    match nf.t.kind with
-    | Frontend ->
-        let rx_map = Option.get nf.t.rx_map in
-        let id = frag.Assemble.id in
-        let gref, page = Hashtbl.find rx_map id in
-        let cs = Io_page.to_cstruct page in
-        (* Copy the data BEFORE releasing the grant and returning the page *)
-        let data_copy = Cstruct.sub_copy cs 0 (Cstruct.length cs) in
-        Hashtbl.remove rx_map id;
-        Export.end_access ~release_ref:true gref >>= fun () ->
-        (* Return the page to the free pool for reuse *)
-        return_page nf page;
-        Lwt.return data_copy
+    match nf.t.tx_pool with
+    | Some _ -> (* Frontend *)
+      let rx_map = Option.get nf.t.rx_map in
+      let id = frag.Assemble.id in
+      let gref, page = Hashtbl.find rx_map id in
+      let cs = Io_page.to_cstruct page in
+      (* Copy the data BEFORE releasing the grant and returning the page *)
+      let data_copy = Cstruct.sub_copy cs 0 (Cstruct.length cs) in
+      Hashtbl.remove rx_map id;
+      Export.end_access ~release_ref:true gref >>= fun () ->
+      (* Return the page to the free pool for reuse *)
+      return_page nf page;
+      Lwt.return data_copy
 
-    | Backend ->
-        let gnt = {Import.domid = nf.t.peer_domid; ref = Gntref.of_int32 frag.Assemble.gref} in
-        Import.with_mapping gnt ~writable:false (fun mapping ->
-          let cs = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-          let cpy = Cstruct.sub_copy cs 0 (Cstruct.length cs) in
-          
-          (match nf.t.tx_ring with
-           | Back_ring bring ->
-               let slot = Ring.Rpc.Back.(slot bring (next_res_id bring)) in
-               let resp = {TX.Response.id = frag.id; status = TX.Response.OKAY} in
-               TX.Response.write resp slot
-           | _ -> ());
-          Lwt.return cpy
-        ) >>= function
-        | Error (`Msg m) -> Lwt.fail_with m
-        | Ok page -> Lwt.return page
+    | None -> (* Backend *)
+      let gnt = {Import.domid = nf.t.peer_domid; ref = Gntref.of_int32 frag.Assemble.gref} in
+      Import.with_mapping gnt ~writable:false (fun mapping ->
+        let cs = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+        let cpy = Cstruct.sub_copy cs 0 (Cstruct.length cs) in
+
+        (match nf.t.tx_ring with
+         | Back_ring bring ->
+             let slot = Ring.Rpc.Back.(slot bring (next_res_id bring)) in
+             let resp = {TX.Response.id = frag.id; status = TX.Response.OKAY} in
+             TX.Response.write resp slot
+         | _ -> ());
+        Lwt.return cpy
+      ) >>= function
+      | Error (`Msg m) -> Lwt.fail_with m
+      | Ok page -> Lwt.return page
 
   let get_evtchn nf = nf.t.evtchn
   let get_stats nf = nf.t.stats
 
   let notify_if_needed nf =
-    match nf.t.kind with
-      | Frontend ->
-        if Ring_ops.push_and_check_notify nf.t.rx_ring then
-          Xen_os.Eventchn.notify h nf.t.evtchn
-      | Backend ->
-        if Ring_ops.push_and_check_notify nf.t.tx_ring then
-          Xen_os.Eventchn.notify h nf.t.evtchn
+    match nf.t.tx_pool with
+    | Some _ -> (* Frontend *)
+      if Ring_ops.push_and_check_notify nf.t.rx_ring then
+        Xen_os.Eventchn.notify h nf.t.evtchn
+    | None -> (* Backend *)
+      if Ring_ops.push_and_check_notify nf.t.tx_ring then
+        Xen_os.Eventchn.notify h nf.t.evtchn
   
   let post_receive nf =
-    match nf.t.kind with
-    | Frontend ->
-        let rx_map = Option.get nf.t.rx_map in
-        let free_slots = Ring_ops.get_free_slots nf.t.rx_ring in
-        if free_slots > 0 then
-          let available_pages = List.length nf.t.free_pages in
-          let to_refill = min free_slots available_pages in
-          if to_refill > 0 then
-            nf.grant_ops.get_rx_grants nf.t to_refill >>= fun grants ->
-            List.iter (fun (gnt, page) ->
-              let id = Ring_ops.next_req_id nf.t.rx_ring mod (1 lsl 16) in (* IDs are uint16 *)
-              let slot = Ring_ops.slot nf.t.rx_ring id in
-              Hashtbl.add rx_map id (gnt, page);
-              RX.Request.(write {RX.Request.id; gref = Gntref.to_int32 gnt}) slot
-            ) grants;
-            Lwt.return_unit
-          else
-            Lwt.return_unit
+    match nf.t.tx_pool with
+    | Some _ -> (* Frontend *)
+      let rx_map = Option.get nf.t.rx_map in
+      let free_slots = Ring_ops.get_free_slots nf.t.rx_ring in
+      if free_slots > 0 then
+        let available_pages = List.length nf.t.free_pages in
+        let to_refill = min free_slots available_pages in
+        if to_refill > 0 then
+          nf.grant_ops.get_rx_grants nf.t to_refill >>= fun grants ->
+          List.iter (fun (gnt, page) ->
+            let id = Ring_ops.next_req_id nf.t.rx_ring mod (1 lsl 16) in (* IDs are uint16 *)
+            let slot = Ring_ops.slot nf.t.rx_ring id in
+            Hashtbl.add rx_map id (gnt, page);
+            RX.Request.(write {RX.Request.id; gref = Gntref.to_int32 gnt}) slot
+          ) grants;
+          Lwt.return_unit
         else
           Lwt.return_unit
-    
-    | Backend ->
-        let rx_grants = Option.get nf.t.rx_grants in
-        Ring_ops.ack nf.t.rx_ring (fun slot ->
-          let req = RX.Request.read slot in
-          ignore(Lwt_dllist.add_r req rx_grants)
-        );
+      else
         Lwt.return_unit
+
+    | None -> (* Backend *)
+      let rx_grants = Option.get nf.t.rx_grants in
+      Ring_ops.ack nf.t.rx_ring (fun slot ->
+        let req = RX.Request.read slot in
+        ignore(Lwt_dllist.add_r req rx_grants)
+      );
+      Lwt.return_unit
 end
 
 module Make(C: S.CONFIGURATION) = struct
@@ -382,7 +378,6 @@ module Make(C: S.CONFIGURATION) = struct
     let free_pages = Io_page.to_pages (Io_page.get 256) in
     let stats = Mirage_net.Stats.create () in
     let transport = {
-      kind = Frontend;
       vif_id = vif_id;
       peer_domid = backend_id;
       mac; peer_mac = None; mtu;
@@ -408,7 +403,6 @@ module Make(C: S.CONFIGURATION) = struct
     let rx_grants = Lwt_dllist.create () in
     let stats = Mirage_net.Stats.create () in
     let transport = {
-      kind = Backend;
       vif_id = device_id;
       peer_domid = frontend_id;
       mac; peer_mac = Some frontend_mac; mtu;
@@ -554,15 +548,15 @@ module Make(C: S.CONFIGURATION) = struct
       Stats.tx (Unified_TX_Ops.get_stats nf.t) (Int64.of_int total_size);
       (* Wait for all TX responses before releasing (Frontend only) *)
       let releases = List.map (fun (_, _, release) -> release) fragments in
-      (match nf.t.kind with
-       | Frontend ->
+      (match nf.t.tx_pool with
+       | Some _ -> (* Frontend *)
          (* Don't block - release in background to avoid init deadlock *)
          Lwt.async (fun () ->
            Lwt.join releases >>= fun () ->
            Unified_TX_Ops.release_fragments nf.t []
          );
          Lwt.return ()
-       | Backend ->
+       | None -> (* Backend *)
          Unified_TX_Ops.release_fragments nf.t []
       )
     ) >|= fun () -> Ok ()
@@ -593,7 +587,7 @@ module Make(C: S.CONFIGURATION) = struct
         Lwt.async (fun () -> callback data);
         Lwt.return_unit
       ) (fun ex ->
-        Log.err (fun f -> f "[%s-RX] Callback FAILED with exception: %s" (match nf.t.kind with | Frontend -> "Frontend" | Backend -> "Backend") (Printexc.to_string ex));
+        Log.err (fun f -> f "[%s-RX] Callback FAILED with exception: %s" (match nf.t.tx_pool with | Some _ -> "Frontend" | None -> "Backend") (Printexc.to_string ex));
         Lwt.return_unit
          )
       )
@@ -627,14 +621,13 @@ module Make(C: S.CONFIGURATION) = struct
   (* Unplug shouldn't block, although the Xen one might need to due
      to Xenstore? XXX *)
   let disconnect nf = 
-    match nf.t.kind, nf.t.tx_pool with
-    | Frontend, Some tx_pool ->
+    match nf.t.tx_pool with
+    | Some tx_pool ->
       Log.info (fun f -> f "disconnect");
       (* TODO: free pages still in [nf.t.rx_map] *)
       Shared_page_pool.shutdown tx_pool;
       Hashtbl.remove devices nf.t.vif_id;
       return ()
-    | Frontend, None (* Should not exists, but we have an optional type *)
-    | Backend, _ -> (* what we need to do here? If the Backend disconnects, the client will lose its network interface... *)
+    | None ->
       failwith "disconnect"
 end
