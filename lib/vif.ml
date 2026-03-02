@@ -467,8 +467,8 @@ module Make(C: S.CONFIGURATION) = struct
       ) else (
         let to_grant, remaining = 
           let rec take acc n = function
-            | [] -> (List.rev acc, [])
-            | _ when n = 0 -> (List.rev acc, t.free_pages) (* TODO: really need to List.rev? *)
+            | [] -> (acc, [])
+            | _ when n = 0 -> (acc, t.free_pages)
             | hd :: tl -> take (hd :: acc) (n - 1) tl
           in
           take [] n t.free_pages
