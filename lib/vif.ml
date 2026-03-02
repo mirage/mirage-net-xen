@@ -19,6 +19,37 @@
 
 (*
  * Unified Xen network channel implementation for both frontend and backend.
+ *
+ * To future reader, here are some findings from the interface rewrite:
+ * TX/RX naming is always from the Frontend perspective. The Frontend owns
+ * all shared pages and allocates them; the Backend never allocates shared
+ * memory and only temporarily maps Frontend pages via grant references.
+ * 
+ * I.e. there is two rings per connection:
+ * - TX ring (Frontend POV):
+ *     Frontend writes TX.Request (send to Backend)
+ *     Backend  writes TX.Response
+ * - RX ring (Frontend POV):
+ *     Frontend writes RX.Request (grants to empty pages)
+ *     Backend  writes RX.Response (data length after copy)
+ * 
+ * Frontend TX:
+ *     Allocate pages from tx_pool, copy data, write TX.Request
+ *     Must wait for TX.Response before reusing pages using promises
+ * Backend TX (= Frontend RX):
+ *     Wait for RX.Request grants, map writable, copy, unmap immediately,
+ *     write RX.Response. No post-response wait required
+ * Backend RX (= Frontend TX):
+ *     Read TX.Request, map pages, process data, write TX.Response
+ * 
+ * We can distinguish Frontend from Backend with the logic:
+ *     tx_pool = Some _ => Frontend
+ *     tx_pool = None   => Backend
+ * 
+ * Flow control:
+ *     Frontend TX waits for ring space + TX.Response
+ *     Backend TX waits only for RX.Request grants
+ *     Notifications via event channels (push_and_check_notify + activation)
  *)
 
 open Lwt.Infix
@@ -149,7 +180,7 @@ let backend_get_n_grefs t n =
 
 module Unified_TX_Ops = struct
   type nonrec t = transport
-  
+
   let fragment_data t data =
     let size = Cstruct.length data in
     
@@ -207,24 +238,21 @@ module Unified_TX_Ops = struct
                 size = to_copy;
                 gref = req.RX.Request.gref;
               } in
+              (match t.rx_ring with
+               | Back_ring bring ->
+                   let slot_id = Ring.Rpc.Back.next_res_id bring in
+                   let slot = Ring.Rpc.Back.slot bring slot_id in
+                   let resp = { RX.Response.id = req.RX.Request.id;
+                                offset = 0;
+                                flags = Flags.empty;
+                                size = Ok to_copy } in
+                   RX.Response.write resp slot
+               | _ -> assert false);
               let page = Import.Local_mapping.to_buf mapping in
               Import.Local_mapping.unmap_exn mapping;
               map_and_copy src (offset + to_copy) ((frag, page, Lwt.return_unit) :: acc_frags) rest
         in
         map_and_copy data 0 [] reqs
-
-  let write_packet_to_ring t packet =
-    (* Writing is now done in fragment_data via Lwt_ring.Front.write *)
-    (* This function is now a no-op for Frontend *)
-    match t.tx_pool with
-    | Some _ -> (* Frontend *)
-      ()
-    | None -> (* Backend *)
-        Assemble.RX_IO.write_packet
-          ~get_slot:(fun () ->
-            let id = Ring_ops.next_req_id t.rx_ring in
-            Ring_ops.slot t.rx_ring id)
-          ~packet
 
   let notify_if_needed t =
     match t.tx_pool with
@@ -330,7 +358,7 @@ module Unified_RX_Ops = struct
         if to_refill > 0 then
           nf.grant_ops.get_rx_grants nf.t to_refill >>= fun grants ->
           List.iter (fun (gnt, page) ->
-            let id = Ring_ops.next_req_id nf.t.rx_ring mod (1 lsl 16) in (* IDs are uint16 *)
+            let id = Ring_ops.next_req_id nf.t.rx_ring mod (1 lsl 16) in (* we have 1 page of grants IDs  *)
             let slot = Ring_ops.slot nf.t.rx_ring id in
             Hashtbl.add rx_map id (gnt, page);
             RX.Request.(write {RX.Request.id; gref = Gntref.to_int32 gnt}) slot
@@ -538,12 +566,6 @@ module Make(C: S.CONFIGURATION) = struct
     Lwt_mutex.with_lock nf.t.tx_mutex (fun () ->
       let total_size = Cstruct.length buf in
       Unified_TX_Ops.fragment_data nf.t buf >>= fun fragments ->
-      let frags_only = List.map (fun (frag, _, _) -> frag) fragments in
-      let packet = Assemble.{
-        total_size;
-        fragments = frags_only;
-      } in
-      Unified_TX_Ops.write_packet_to_ring nf.t packet;
       Unified_TX_Ops.notify_if_needed nf.t;
       Stats.tx (Unified_TX_Ops.get_stats nf.t) (Int64.of_int total_size);
       (* Wait for all TX responses before releasing (Frontend only) *)
