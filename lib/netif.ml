@@ -1012,7 +1012,7 @@ module Make(C: S.CONFIGURATION) = struct
     let grant_share =
       if elapsed_ns > 0L then Int64.to_float c.grant_ns /. Int64.to_float elapsed_ns
       else 0.0 in
-    Log.info (fun f -> f
+    Log.debug (fun f -> f
       "[%s] counters: polls=%d rx_frames=%d frags/frame=%.2f frames/poll=%.2f \
        rx_dropped=%d tx_frames=%d tx_frags/frame=%.2f free_pages=%d \
        ops/s=%.0f grant_ops=%d grant_us/op=%.2f grant_share=%.1f%% \
