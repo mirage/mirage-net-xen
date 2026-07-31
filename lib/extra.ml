@@ -7,6 +7,11 @@ let type_mcast_add = 2
 let type_mcast_del = 3
 let type_hash = 4
 
+(* Which protocol the peer is asked to segment, from io/netif.h. *)
+let gso_type_none = 0
+let gso_type_tcpv4 = 1
+let gso_type_tcpv6 = 2
+
 type t = {
   typ : int;       (* uint8 *)
   flags : int;     (* uint8 *)

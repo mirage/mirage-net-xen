@@ -27,8 +27,8 @@ let supported = {
   rx_copy = true;
   rx_notify = true;
   sg = true;
+  gso_tcpv4 = true;
   (* FIXME: not sure about these *)
   rx_flip = false;
-  gso_tcpv4 = false;
   smart_poll = false;
 }
