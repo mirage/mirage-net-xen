@@ -36,8 +36,11 @@ type assembled = (packet, fragment list) result
     Reading never raises on peer-controlled data. *)
 
 module type IO = sig
-  val read_packets : ack_fn:((Cstruct.t -> unit) -> unit) -> assembled list
-  (** Drains the ring through [ack_fn], which hands over each slot in turn. *)
+  val read_packets :
+    with_extras:bool -> ack_fn:((Cstruct.t -> unit) -> unit) -> assembled list
+  (** Drains the ring through [ack_fn], which hands over each slot in turn.
+      [with_extras] says whether extra_info descriptors may follow a message,
+      which is only so once this end has advertised a feature that uses them. *)
 end
 
 module RX_IO : IO
