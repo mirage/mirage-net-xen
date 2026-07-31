@@ -1,3 +1,12 @@
+(* Descriptor types, from io/netif.h. Naming them matters more than it looks:
+   the values are adjacent and a wrong one is silent, since the peer simply
+   reads the descriptor it has been told it is holding. *)
+let type_none = 0
+let type_gso = 1
+let type_mcast_add = 2
+let type_mcast_del = 3
+let type_hash = 4
+
 type t = {
   typ : int;       (* uint8 *)
   flags : int;     (* uint8 *)
@@ -21,12 +30,7 @@ let set_extra_gso_pad c pad = Cstruct.set_uint8 c 5 pad
 let read slot =
   let typ = get_extra_type slot in
   let flags = get_extra_flags slot in
-  (* Type values:
-     0 -> None
-     1 -> NETIF_EXTRA_TYPE_CSUM
-     2 -> NETIF_EXTRA_TYPE_GSO
-     3 -> NETIF_EXTRA_TYPE_TSO *)
-  if typ = 2 then ( (* NETIF_EXTRA_TYPE_GSO *)
+  if typ = type_gso then (
     let gso_size = get_extra_gso_size slot in
     let gso_type = get_extra_gso_type slot in (* GSO type = 1 for TCPv4 *)
     let gso_pad = get_extra_gso_pad slot in
@@ -38,7 +42,7 @@ let read slot =
 let write t slot =
   set_extra_type slot t.typ;
   set_extra_flags slot t.flags;
-  if t.typ = 2 then ( (* NETIF_EXTRA_TYPE_GSO *)
+  if t.typ = type_gso then (
     set_extra_gso_size slot t.gso_size;
     set_extra_gso_type slot t.gso_type;
     set_extra_gso_pad slot t.gso_pad
