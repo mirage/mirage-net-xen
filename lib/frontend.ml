@@ -196,33 +196,22 @@ module Make(C: S.CONFIGURATION) = struct
     Lwt.return page
 
   let rx_poll nf fn =
-    let module Recv = Assemble.Make(RX.Response) in
-    let q = ref [] in
-    Ring.Rpc.Front.ack_responses nf.rx_fring (fun slot ->
-      match RX.Response.read slot with
-      | Error msg -> failwith msg
-      | Ok req -> q := req :: !q
-    );
-    List.rev !q
-    |> Recv.group_frames
+    Assemble.RX_IO.read_packets ~ack_fn:(Ring.Rpc.Front.ack_responses nf.rx_fring)
     |> Lwt_list.iter_s (function
-      | Error (e, msgs) ->
-          Log.err (fun f -> f "received error: %d" e);
-          msgs |> Lwt_list.iter_s (fun msg ->
-            pop_rx_page nf msg.RX.Response.id >>= fun (page : Io_page.t) ->
-            return_page nf page ;
-            Lwt.return_unit
-          )
-      | Ok frame ->
-          let data = Cstruct.create frame.Recv.total_size in
+      | Error frags ->
+          Log.err (fun f -> f "dropping an unassembled packet (%d fragments)"
+            (List.length frags));
+          frags |> Lwt_list.iter_s (fun frag ->
+            pop_rx_page nf frag.Assemble.id >|= return_page nf)
+      | Ok packet ->
+          let data = Cstruct.create packet.Assemble.total_size in
           let next = ref 0 in
-          frame.Recv.fragments |> Lwt_list.iter_s (fun {Recv.size; msg} ->
-            let {RX.Response.id; size = _; flags = _; offset} = msg in
-            pop_rx_page nf id >|= fun page ->
+          packet.Assemble.fragments |> Lwt_list.iter_s (fun frag ->
+            pop_rx_page nf frag.Assemble.id >|= fun page ->
             let buf = Io_page.to_cstruct page in
-            Cstruct.blit buf offset data !next size;
+            Cstruct.blit buf frag.Assemble.offset data !next frag.Assemble.size;
             return_page nf page ;
-            next := !next + size
+            next := !next + frag.Assemble.size
           ) >|= fun () ->
           assert (!next = Cstruct.length data);
           Lwt.async (fun () ->

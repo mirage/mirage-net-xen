@@ -144,26 +144,27 @@ module Make(C: S.CONFIGURATION) = struct
       match t.from_netfront with
       | None -> raise Netback_shutdown
       | Some x -> x in
-    let module Recv = Assemble.Make(TX.Request) in
+    (* Answer a request we will not read, so the peer can reuse its block. *)
+    let answer_error frag =
+      let ring = from_netfront () in
+      let slot = Ring.Rpc.Back.(slot ring (next_res_id ring)) in
+      TX.Response.write
+        { TX.Response.id = frag.Assemble.id; status = TX.Response.ERROR } slot in
     let rec loop after =
-      let q = ref [] in
-      Ring.Rpc.Back.ack_requests (from_netfront ())
-        (fun slot ->
-          match TX.Request.read slot with
-          | Error msg -> Log.warn (fun f -> f "read_read TX has unparseable request: %s" msg)
-          | Ok req ->
-            q := req :: !q
-        );
+      Assemble.TX_IO.read_packets
+        ~ack_fn:(Ring.Rpc.Back.ack_requests (from_netfront ()))
       (* -- at this point the ring slots may be overwritten, but the grants are still valid *)
-      List.rev !q
-      |> Recv.group_frames
       |> Lwt_list.iter_s (function
-        | Error (e, _) -> e.TX.Request.impossible
-        | Ok frame ->
-            let data = Cstruct.create frame.Recv.total_size in
+        | Error frags ->
+            Log.warn (fun f -> f "dropping an unassembled packet (%d fragments)"
+              (List.length frags));
+            List.iter answer_error frags;
+            return ()
+        | Ok packet ->
+            let data = Cstruct.create packet.Assemble.total_size in
             let next = ref 0 in
-            frame.Recv.fragments |> Lwt_list.iter_s (fun {Recv.size; msg} ->
-              let { TX.Request.flags = _; size = _; offset; gref; id } = msg in
+            packet.Assemble.fragments |> Lwt_list.iter_s (fun frag ->
+              let { Assemble.offset; gref; id; size } = frag in
               let gnt = { Import.
                 domid = t.frontend_id;
                 ref = Gntref.of_int32 gref
@@ -258,7 +259,7 @@ module Make(C: S.CONFIGURATION) = struct
                Stats.tx t.stats (Int64.of_int len);
                return ()
              | reqs ->
-               let rec fill_reqs ~src ~is_first = function
+               let rec fill_reqs ~src = function
                  | r :: rs ->
                    let gnt = {Import.domid = t.frontend_id; ref = Gntref.of_int32 r.RX.Request.gref} in
                    let mapping = Import.map_exn gnt ~writable:true in
@@ -268,11 +269,12 @@ module Make(C: S.CONFIGURATION) = struct
                    let slot =
                      let ring = to_netfront t in
                      Ring.Rpc.Back.(slot ring (next_res_id ring)) in
-                   let size = Ok (if is_first then size else len) in
+                   (* Own size, not the total: that is the transmit rule. *)
+                   let size = Ok len in
                    let flags = if rs = [] then Flags.empty else Flags.more_data in
                    let resp = { RX.Response.id = r.RX.Request.id; offset = 0; flags; size } in
                    RX.Response.write resp slot;
-                   fill_reqs ~src ~is_first:false rs
+                   fill_reqs ~src rs
                  | [] when Cstruct.lenv src = 0 -> ()
                  | [] -> failwith "BUG: not enough pages for data!" in
                (* TODO: find a smarter way to not need to copy around *)
@@ -280,7 +282,7 @@ module Make(C: S.CONFIGURATION) = struct
                let len = fillf data in
                if len > size then failwith "length exceeds total size" ;
                let src = Cstruct.sub data 0 len in
-               fill_reqs ~src:[src] ~is_first:true reqs;
+               fill_reqs ~src:[src] reqs;
                Stats.tx t.stats (Int64.of_int len);
                return ()
            ) >|= fun () -> Ok (
