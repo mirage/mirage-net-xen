@@ -1,3 +1,11 @@
+(** Descriptor types, from io/netif.h. *)
+
+val type_none : int
+val type_gso : int
+val type_mcast_add : int
+val type_mcast_del : int
+val type_hash : int
+
 type t = {
   typ : int;       (* uint8 *)
   flags : int;     (* uint8 *)
