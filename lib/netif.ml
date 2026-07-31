@@ -279,7 +279,7 @@ module Unified_TX_Ops = struct
                      let flags = if has_more then Flags.more_data else Flags.empty in
                      let request = { TX.Request.id; gref = Gntref.to_int32 gref;
                                      offset = shared_block.Cstruct.off; flags;
-                                     size = request_size } in
+                                     size = request_size; extras = [] } in
                      Lwt_ring.Front.write client (fun slot ->
                        TX.Request.write request slot; id
                      ) >>= fun replied ->
@@ -343,7 +343,7 @@ module Unified_TX_Ops = struct
                    let slot = Ring.Rpc.Back.(slot bring (next_res_id bring)) in
                    (* Each RX response carries the size of its own fragment. *)
                    let resp = { RX.Response.id = req.RX.Request.id; offset = 0;
-                                flags; size = resp_size } in
+                                flags; size = resp_size; extras = [] } in
                    RX.Response.write resp slot
                | _ -> assert false);
               copy_to_peer (offset + to_copy)
@@ -373,7 +373,7 @@ module Unified_TX_Ops = struct
           | Front_ring (_, client) ->
               let request = { TX.Request.id; gref = Gntref.to_int32 gref;
                               offset = shared_block.Cstruct.off;
-                              flags = Flags.empty; size = len } in
+                              flags = Flags.empty; size = len; extras = [] } in
               Lwt_ring.Front.write client (fun slot ->
                 TX.Request.write request slot; id
               ) >>= fun replied ->
@@ -402,9 +402,11 @@ module Unified_RX_Ops = struct
     check_open nf.t;
     match nf.t.tx_pool with
     | Some _ -> (* Frontend reads responses on RX *)
-      Assemble.RX_IO.read_packets ~ack_fn:(Ring_ops.ack nf.t.rx_ring)
+      Assemble.RX_IO.read_packets ~with_extras:Features.supported.gso_tcpv4
+        ~ack_fn:(Ring_ops.ack nf.t.rx_ring)
     | None -> (* Backend reads requests on TX *)
-      Assemble.TX_IO.read_packets ~ack_fn:(Ring_ops.ack nf.t.tx_ring)
+      Assemble.TX_IO.read_packets ~with_extras:Features.supported.gso_tcpv4
+        ~ack_fn:(Ring_ops.ack nf.t.tx_ring)
 
   external unsafe_fill_bigstring : Io_page.t -> int -> int -> int -> unit
     = "caml_fill_bigstring" [@@noalloc]

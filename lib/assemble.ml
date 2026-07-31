@@ -71,6 +71,9 @@ module type MESSAGE = sig
   val flags : t -> Flags.t
   val size : t -> (int, error) result
   val gref : t -> int32
+
+  val set_extras : t -> Extra.t list -> t
+  val extras : t -> Extra.t list
 end
 
 module RX_Message : MESSAGE with type t = RX.Response.t
@@ -85,6 +88,9 @@ module RX_Message : MESSAGE with type t = RX.Response.t
   let size msg = msg.RX.Response.size
   (* The page is the reader's own, found from the id. *)
   let gref _msg = 0l
+
+  let set_extras msg extras = {msg with RX.Response.extras = extras}
+  let extras msg = msg.RX.Response.extras
 end
 
 module TX_Message : MESSAGE with type t = TX.Request.t
@@ -98,17 +104,59 @@ module TX_Message : MESSAGE with type t = TX.Request.t
   let flags msg = msg.TX.Request.flags
   let size msg = TX.Request.size msg
   let gref msg = msg.TX.Request.gref
+
+  let set_extras msg extras = {msg with TX.Request.extras = extras}
+  let extras msg = msg.TX.Request.extras
 end
 
 module Make_Reader(Msg : MESSAGE)(Size : SIZE_STRATEGY) = struct
 
-  let collect_messages ack_fn =
+  (* A descriptor sits in the slot after the message it qualifies and carries no
+     data, so it has to be recognised rather than read as another message. *)
+  let collect_messages ?(with_extras=false) ack_fn =
     let messages = ref [] in
+    let pending_msg = ref None in
+    let pending_extras = ref [] in
+
     ack_fn (fun slot ->
-      match Msg.read slot with
-      | Error e -> Log.warn (fun f -> f "[%s] Bad msg: %s" Size.name e)
-      | Ok msg -> messages := msg :: !messages
+      if with_extras then (
+        match !pending_msg with
+        | Some base_msg ->
+            begin match Extra.read slot with
+            | Error e ->
+                Log.warn (fun f -> f "[%s] Drop bad extra_info: %s" Size.name e);
+                messages := base_msg :: !messages;
+                pending_msg := None;
+                pending_extras := []
+            | Ok extra ->
+                pending_extras := extra :: !pending_extras;
+                (* Bit 0 of flags: 0 = last extra, 1 = more extras *)
+                if extra.Extra.flags land 1 = 0 then (
+                  messages := Msg.set_extras base_msg (List.rev !pending_extras) :: !messages;
+                  pending_msg := None;
+                  pending_extras := []
+                )
+            end
+        | None ->
+            match Msg.read slot with
+            | Error e -> Log.warn (fun f -> f "[%s] Bad msg: %s" Size.name e)
+            | Ok msg ->
+                if Flags.(mem extra_info) (Msg.flags msg) then
+                  pending_msg := Some msg
+                else
+                  messages := msg :: !messages
+      ) else (
+        match Msg.read slot with
+        | Error e -> Log.warn (fun f -> f "[%s] Bad msg: %s" Size.name e)
+        | Ok msg -> messages := msg :: !messages
+      )
     );
+    if with_extras then (
+      match !pending_msg with
+      | Some base_msg ->
+          Log.warn (fun f -> f "[%s] Orphan message recovered" Size.name);
+          messages := Msg.set_extras base_msg (List.rev !pending_extras) :: !messages
+      | None -> ());
     List.rev !messages
 
   (* Enough to release the page and grant, without trusting the size field. *)
@@ -175,8 +223,8 @@ module Make_Reader(Msg : MESSAGE)(Size : SIZE_STRATEGY) = struct
 
         Ok { total_size; fragments = first_fragment :: rest_fragments }
 
-  let read_packets ack_fn =
-    let messages = collect_messages ack_fn in
+  let read_packets ?with_extras ack_fn =
+    let messages = collect_messages ?with_extras ack_fn in
     let packets = group_into_packets messages in
     Log.debug (fun f -> f "[%s.Reader] read_packets: %d messages -> %d packets (%d dropped)"
       Size.name (List.length messages) (List.length packets)
@@ -188,13 +236,14 @@ module RX_Reader = Make_Reader(RX_Message)(RX_Size_Strategy)
 module TX_Reader = Make_Reader(TX_Message)(TX_Size_Strategy)
 
 module type IO = sig
-  val read_packets : ack_fn:((Cstruct.t -> unit) -> unit) -> assembled list
+  val read_packets :
+    with_extras:bool -> ack_fn:((Cstruct.t -> unit) -> unit) -> assembled list
 end
 
 module RX_IO : IO = struct
-  let read_packets ~ack_fn = RX_Reader.read_packets ack_fn
+  let read_packets ~with_extras ~ack_fn = RX_Reader.read_packets ~with_extras ack_fn
 end
 
 module TX_IO : IO = struct
-  let read_packets ~ack_fn = TX_Reader.read_packets ack_fn
+  let read_packets ~with_extras ~ack_fn = TX_Reader.read_packets ~with_extras ack_fn
 end

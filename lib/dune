@@ -1,7 +1,7 @@
 (library
  (name mirage_net_xen)
  (public_name mirage-net-xen)
- (modules Xenstore S Stats Flags RX TX Features
+ (modules Xenstore S Stats Flags RX TX Features Extra
    Shared_page_pool Assemble Netif)
  (wrapped false)
  (libraries cstruct macaddr mirage-xen lwt-dllist logs mirage-net io-page))

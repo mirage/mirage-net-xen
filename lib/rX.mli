@@ -34,6 +34,7 @@ module Response : sig
     offset: int;
     flags: Flags.t;
     size: (int, error) result;
+    extras : Extra.t list;
   }
 
   val read: Cstruct.t -> (t, string) result
