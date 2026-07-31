@@ -20,7 +20,12 @@ type t [@@deriving sexp]
 
 val empty : t
 
-val checksum_blank : t
+(** {1 Direction dependent flags}
+
+    Bits 0 and 1 swap meaning between the rings, so they are named by direction
+    and a value built for one ring must never be written to the other. *)
+
+val tx_checksum_blank : t
 (** Indicates that this is a TCP or UDP packet with an incomplete checksum.
     The separate IPv4 header checksum must always be calculated by the frontend.
     If you set this flag for other types of packet (e.g. ARP requests), then
@@ -44,7 +49,15 @@ val checksum_blank : t
     http://lists.xenproject.org/archives/html/xen-devel/2011-03/msg01901.html
   *)
 
-val data_validated : t
+val tx_data_validated : t
+(** The packet has been checked against its protocol checksum. On the transmit
+    ring this is bit 1, and csum_blank implies it. *)
+
+val rx_checksum_blank : t
+(** The receive ring's spelling of {!tx_checksum_blank}, which is bit 1 here. *)
+
+val rx_data_validated : t
+(** The receive ring's spelling of {!tx_data_validated}, which is bit 0 here. *)
 
 val more_data : t
 (** This request does not contain the entire frame. The following request

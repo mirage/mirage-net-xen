@@ -19,8 +19,15 @@ type t = int
 
 let empty          = 0
 
-let checksum_blank = 1
-let data_validated = 2
+(* Bits 0 and 1 swap meaning between the rings: io/netif.h gives bit 0 to
+   csum_blank and bit 1 to data_validated on transmit, and the reverse on
+   receive. Bits 2 and 3 agree, so they need no qualifier. *)
+let tx_checksum_blank = 1
+let tx_data_validated = 2
+
+let rx_data_validated = 1
+let rx_checksum_blank = 2
+
 let more_data      = 4
 let extra_info     = 8
 
