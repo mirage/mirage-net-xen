@@ -28,6 +28,15 @@ type fragment = {
 type packet = {
   total_size: int;
   fragments: fragment list;
+  (* Ring ids of the slots that extra_info descriptors consumed. Such a slot
+     cost the reader whatever a slot costs, a page on the receive ring, but
+     carries no data and yields no fragment, so nothing else would give it back.
+
+     Derived by position: a descriptor sits in the slot after the message it
+     qualifies and ids run consecutively. That only holds where the reader
+     assigned the ids, so a backend reading ids its peer chose must not use
+     these. *)
+  extra_ids: int list;
 }
 
 (* [Error frags] reports the fragments of a packet that could not be assembled,
@@ -198,6 +207,11 @@ module Make_Reader(Msg : MESSAGE)(Size : SIZE_STRATEGY) = struct
         (List.length sizes));
       Error (List.map fragment_of_msg msgs)
     end else
+      let extra_ids =
+        List.mapi
+          (fun k _ -> (Msg.id first_msg + k + 1) land 0xffff)
+          (Msg.extras first_msg)
+      in
       let sizes = List.map (function Ok s -> s | Error _ -> assert false) sizes in
       let first_size = List.hd sizes in
       let rest_sizes = List.tl sizes in
@@ -221,7 +235,7 @@ module Make_Reader(Msg : MESSAGE)(Size : SIZE_STRATEGY) = struct
           { id = Msg.id msg; offset = Msg.offset msg; size; gref = Msg.gref msg }
         ) continuation_msgs rest_sizes in
 
-        Ok { total_size; fragments = first_fragment :: rest_fragments }
+        Ok { total_size; fragments = first_fragment :: rest_fragments; extra_ids }
 
   let read_packets ?with_extras ack_fn =
     let messages = collect_messages ?with_extras ack_fn in
