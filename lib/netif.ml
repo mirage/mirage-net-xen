@@ -76,6 +76,13 @@ type counters = {
   mutable grant_ns: int64;
   mutable grant_ops: int;
   mutable last_ns: int64;      (* clock at the last summary, for exact rates *)
+  (* Frames handed over with a GSO descriptor attached. Without this there is no
+     telling an aggregating link from one that never had a frame worth it. *)
+  mutable tx_aggregated: int;
+  (* Of those, the ones spanning more than one page, which are the only ones
+     setting more_data alongside the descriptor. Kept apart because a fault that
+     touches only the multi-slot form is invisible in the total. *)
+  mutable tx_aggregated_multi: int;
 }
 
 (* On a timer rather than every N frames, so the counters keep coming when
@@ -90,6 +97,7 @@ let new_counters () = {
   polls = 0; rx_frames = 0; rx_fragments = 0; rx_dropped = 0;
   tx_frames = 0; tx_fragments = 0; reported_at = 0;
   grant_ns = 0L; grant_ops = 0; last_ns = monotonic_ns ();
+  tx_aggregated = 0; tx_aggregated_multi = 0;
 }
 
 (* Charge the time since [before] to the grant total. Call sites read the clock
@@ -118,6 +126,14 @@ type transport = {
      pages and touching them after that is a use after free. *)
   mutable closed: bool;
   ending : ending;
+
+  (* The two halves of feature-gso-tcpv4, which the protocol keeps separate.
+     [peer_accepts_gso] is what the other end advertised, so it gates what we
+     put on the ring. [accepts_gso] is what we advertised, so it gates what we
+     must be ready to read: once set, every descriptor stream has to be parsed
+     for extra_info whether or not any arrives. *)
+  peer_accepts_gso: bool;
+  accepts_gso: bool;
 }
 
 type t = {
@@ -128,6 +144,13 @@ type t = {
      receive ring and grants fresh ones as the ring is refilled. *)
   get_rx_grants: transport -> int -> (Xen_os.Xen.Gntref.t * Io_page.t) list Lwt.t;
 }
+
+(* Whether this end may hand the peer a frame larger than the link, which needs
+   both that the peer agreed to segment it and that we are the side attaching the
+   descriptor saying how. Everything that promises an oversized frame and
+   everything that emits one asks this same question. *)
+let may_aggregate t =
+  (match t.tx_pool with Front _ -> false | Back _ -> true) && t.peer_accepts_gso
 
 let check_open t = if t.closed then raise Netback_shutdown
 
@@ -218,6 +241,46 @@ module Unified_TX_Ops = struct
   (* Frame lengths count this, mtu does not. The two are not interchangeable. *)
   let ethernet_header_size = 14
 
+  (* The mss a GSO descriptor carries is the MTU less the headers the peer will
+     repeat on every segment, and both lengths are in the frame itself. Assuming
+     mtu - 40 is right only for option free headers. Returning None also answers
+     whether GSO applies at all, TCPv4 being the only type on offer. *)
+  let tcpv4_mss ~mtu frame =
+    let ethertype_ipv4 = 0x0800 and ip_proto_tcp = 6 in
+    let ipv4_min = 20 and tcp_min = 20 in
+    if Cstruct.length frame < ethernet_header_size + ipv4_min then None
+    else if Cstruct.BE.get_uint16 frame 12 <> ethertype_ipv4 then None
+    else
+      let ip = Cstruct.shift frame ethernet_header_size in
+      let ihl = Cstruct.get_uint8 ip 0 land 0x0f in
+      let ip_header_size = ihl * 4 in
+      if ihl < 5 || Cstruct.length ip < ip_header_size + tcp_min then None
+      else if Cstruct.get_uint8 ip 9 <> ip_proto_tcp then None
+      else
+        let tcp = Cstruct.shift ip ip_header_size in
+        let data_offset = Cstruct.get_uint8 tcp 12 lsr 4 in
+        let tcp_header_size = data_offset * 4 in
+        if data_offset < 5 then None
+        else
+          let mss = mtu - ip_header_size - tcp_header_size in
+          if mss <= 0 then None else Some mss
+
+  (* Claim the next slot and put a GSO descriptor in it. Nothing is pushed here:
+     the caller pushes once the whole frame is on the ring, and claiming the slot
+     has already moved the producer index. No wakener is registered either, the
+     peer never answering a descriptor slot on its own account. *)
+  let write_gso_extra ending gso_size gso_type =
+    let extra =
+      { Extra.typ = Extra.type_gso; flags = 0; gso_size; gso_type; gso_pad = 0 }
+    in
+    match ending with
+    | Front { tx_ring = fring, _ ; _ } ->
+        let slot_id = Ring.Rpc.Front.next_req_id fring in
+        Extra.write extra (Ring.Rpc.Front.slot fring slot_id)
+    | Back { rx_ring ; _ } ->
+        let slot_id = Ring.Rpc.Back.next_res_id rx_ring in
+        Extra.write extra (Ring.Rpc.Back.slot rx_ring slot_id)
+
   (* The peer answers every transmit request, and a status other than OKAY means
      the frame did not go out. *)
   let check_reply replied =
@@ -234,6 +297,28 @@ module Unified_TX_Ops = struct
      once the peer has answered for it. *)
   let fragment_data t ?src_page data =
     let size = Cstruct.length data in
+    (* Decide once whether this frame goes out aggregated and with what mss, so
+       that the decision and the descriptor cannot disagree. The threshold is the
+       MTU itself: at or below it a frame needs no explaining, above it one
+       always does. [size] is a frame length and [mtu] a payload length, hence
+       the header between them.
+
+       Only the backend aggregates. On the frontend transmit path a descriptor
+       claims a request slot and the peer answers by skipping the matching
+       response slot; Lwt_ring, which owns the waker table, would read that stale
+       slot as a response. Filtering it out needs a waker table of our own. *)
+    let gso_mss =
+      if may_aggregate t && size > t.mtu + ethernet_header_size then
+        tcpv4_mss ~mtu:t.mtu data
+      else None
+    in
+    let use_gso = gso_mss <> None in
+    (match gso_mss with
+     | None -> ()
+     | Some _ ->
+         t.counters.tx_aggregated <- t.counters.tx_aggregated + 1;
+         if size > Io_page.page_size then
+           t.counters.tx_aggregated_multi <- t.counters.tx_aggregated_multi + 1);
     match t.ending with
     | Front { tx_pool ; tx_ring = (_, client) ; _ } -> (* Frontend *)
         let nfrags = Shared_page_pool.blocks_needed size in
@@ -275,7 +360,25 @@ module Unified_TX_Ops = struct
                 "Netif.fragment_data: the backend needs a page aligned source"
         in
         let pages_needed = max 1 @@ Io_page.round_to_page_size size / Io_page.page_size in
+        (* A descriptor overlays a response, and the frontend pairs responses
+           with requests by ring position: the id field is part of what the
+           descriptor overlays, so there is nothing else it could use. io/netif.h
+           makes this the backend's problem, the descriptor having to sit in the
+           slot of a request that was actually consumed. So take one request more
+           than there are pages; its grant goes unused, only its slot is wanted.
+           Writing one more response than we consume requests is what puts the
+           two streams permanently out of step. *)
+        let slots_needed = if use_gso then pages_needed + 1 else pages_needed in
         backend_get_n_grefs t rx_ring rx_grants pages_needed >>= fun reqs ->
+        (* The descriptor follows the first response, so the second consumed
+           request is the one spent on it. *)
+        let reqs =
+          if use_gso then
+            match reqs with
+            | first :: _spent_on_the_descriptor :: rest -> first :: rest
+            | _ -> reqs
+          else reqs
+        in
 
         let rec copy_to_peer offset acc_frags = function
           | [] -> return (List.rev acc_frags)
@@ -311,14 +414,20 @@ module Unified_TX_Ops = struct
                 gref = req.RX.Request.gref;
               } in
               let has_more = (rest <> []) in
-              let flags = if has_more then Flags.more_data else Flags.empty in
-
+              let is_first = (offset = 0) in
+              let flags =
+                Flags.((if has_more then more_data else empty)
+                       ++ (if is_first && use_gso then extra_info else empty))
+              in
               let slot = Ring.Rpc.Back.(slot rx_ring (next_res_id rx_ring)) in
               (* Each RX response carries the size of its own fragment. *)
               let resp = { RX.Response.id = req.RX.Request.id; offset = 0;
                            flags; size = resp_size; extras = [] } in
               RX.Response.write resp slot
-              copy_to_peer (offset + to_copy) ((frag, Lwt.return_unit) :: acc_frags) rest
+              (match (if is_first then gso_mss else None) with
+               | None -> ()
+               | Some mss ->
+                   write_gso_extra t.rx_ring mss Extra.gso_type_tcpv4);
         in
         copy_to_peer 0 [] reqs
 
@@ -367,10 +476,10 @@ module Unified_RX_Ops = struct
     match nf.t.ending with
     | Front { rx_ring = ring, _ ; _}  -> (* Frontend reads responses on RX *)
       let ack_fn = Ring.Rpc.Front.ack_responses ring in
-      Assemble.RX_IO.read_packets ~ack_fn ~with_extras:Features.supported.gso_tcpv4
+      Assemble.RX_IO.read_packets ~ack_fn ~with_extras:nf.t.accepts_gso
     | Back { tx_ring ; _ } -> (* Backend reads requests on TX *)
       let ack_fn = Ring.Rpc.Back.ack_requests tx_ring in
-      Assemble.TX_IO.read_packets ~ack_fn ~with_extras:Features.supported.gso_tcpv4
+      Assemble.TX_IO.read_packets ~ack_fn ~with_extras:nf.t.accepts_gso
 
   external unsafe_fill_bigstring : Io_page.t -> int -> int -> int -> unit
     = "caml_fill_bigstring" [@@noalloc]
@@ -417,9 +526,8 @@ module Unified_RX_Ops = struct
      undone and the peer's transmit ring fills up and it stops sending. A NULL
      status is what says "nothing here". *)
   let release_extra_slots nf ids =
-    match nf.t.tx_pool with
-    | Some _ -> (* Frontend: the page is ours *)
-      let rx_map = Option.get nf.t.rx_map in
+    match nf.t.ending with
+    | Front { rx_map ; _ } -> (* Frontend: the page is ours *)
       ids |> Lwt_list.iter_s (fun id ->
         match Hashtbl.find_opt rx_map id with
         | None ->
@@ -429,14 +537,11 @@ module Unified_RX_Ops = struct
           Hashtbl.remove rx_map id;
           Export.end_access ~release_ref:true gref >|= fun () ->
           return_page nf page)
-    | None -> (* Backend: only the slot, answered so the peer reclaims it *)
+    | Back { tx_ring ; _ } -> (* Backend: only the slot, answered so the peer reclaims it *)
       List.iter (fun _id ->
-        match nf.t.tx_ring with
-        | Back_ring bring ->
-          let slot = Ring.Rpc.Back.(slot bring (next_res_id bring)) in
-          TX.Response.write
-            { TX.Response.id = 0; status = TX.Response.NULL } slot
-        | _ -> ()) ids;
+        let slot = Ring.Rpc.Back.(slot bring (next_res_id bring)) in
+        TX.Response.write
+          { TX.Response.id = 0; status = TX.Response.NULL } slot) ids ;
       Lwt.return_unit
 
   (* [read] is handed the page the fragment sits in and must take what it needs
@@ -536,7 +641,7 @@ module Make(C: S.CONFIGURATION) = struct
   (** Set of active block devices *)
   let devices : (int, t) Hashtbl.t = Hashtbl.create 1
 
-  let create_frontend ~vif_id ~backend_id ~mac ~mtu =
+  let create_frontend ~vif_id ~backend_id ~mac ~mtu ~peer_accepts_gso =
     Log.info (fun f -> f "[Frontend] Creating: id=%d domid=%d" vif_id backend_id);
     frontend_create_ring ~domid:backend_id ~idx_size:TX.total_size
       (Printf.sprintf "Netif.TX.%d" vif_id)
@@ -560,10 +665,12 @@ module Make(C: S.CONFIGURATION) = struct
       free_pages = Io_page.to_pages (Io_page.get 256);
       evtchn; stats = Mirage_net.Stats.create (); counters = new_counters (); closed = false;
       ending;
+      peer_accepts_gso = peer_accepts_gso && Features.supported.gso_tcpv4;
+      accepts_gso = Features.supported.gso_tcpv4;
     }
 
   let create_backend ~cleanup ~domid ~device_id ~frontend_mac ~mac ~mtu
-      ~tx_ring_ref ~rx_ring_ref ~event_channel =
+      ~tx_ring_ref ~rx_ring_ref ~event_channel ~peer_accepts_gso =
     Log.info (fun f -> f "[Backend] Creating: domid=%d device_id=%d" domid device_id);
     backend_import_ring ~domid ~gntref:(Xen_os.Xen.Gntref.of_int32 tx_ring_ref)
       ~idx_size:TX.total_size "Netif.Backend.TX" true
@@ -590,6 +697,8 @@ module Make(C: S.CONFIGURATION) = struct
       free_pages = [];
       evtchn = channel; stats = Mirage_net.Stats.create (); counters = new_counters (); closed = false;
       ending;
+      peer_accepts_gso = peer_accepts_gso && Features.supported.gso_tcpv4;
+      accepts_gso = Features.supported.gso_tcpv4;
     }
 
   let plug_frontend vif_id =
@@ -598,7 +707,9 @@ module Make(C: S.CONFIGURATION) = struct
     let backend_id = backend_conf.S.backend_id in
     C.read_frontend_mac id >>= fun mac ->
     C.read_mtu id >>= fun mtu ->
-    create_frontend ~vif_id ~backend_id ~mac ~mtu >>= fun transport ->
+    create_frontend ~vif_id ~backend_id ~mac ~mtu
+      ~peer_accepts_gso:backend_conf.S.features_available.gso_tcpv4
+    >>= fun transport ->
     let front_conf = { S.
       tx_ring_ref = Xen_os.Xen.Gntref.to_int32 transport.tx_gnt;
       rx_ring_ref = Xen_os.Xen.Gntref.to_int32 transport.rx_gnt;
@@ -668,6 +779,7 @@ module Make(C: S.CONFIGURATION) = struct
       ~tx_ring_ref:f.S.tx_ring_ref
       ~rx_ring_ref:f.S.rx_ring_ref
       ~event_channel:f.S.event_channel
+      ~peer_accepts_gso:f.S.feature_requests.gso_tcpv4
     >>= fun transport ->
     C.connect id >>= fun () ->
     Log.info (fun f -> f "[Backend] Connected to frontend");
@@ -827,7 +939,8 @@ module Make(C: S.CONFIGURATION) = struct
     Log.info (fun f -> f
       "[%s] counters: polls=%d rx_frames=%d frags/frame=%.2f frames/poll=%.2f \
        rx_dropped=%d tx_frames=%d tx_frags/frame=%.2f free_pages=%d \
-       ops/s=%.0f grant_ops=%d grant_us/op=%.2f grant_share=%.1f%%"
+       ops/s=%.0f grant_ops=%d grant_us/op=%.2f grant_share=%.1f%% \
+       tx_aggregated=%d tx_agg_multi=%d extras_seen=%d"
       (direction nf) c.polls c.rx_frames
       (ratio c.rx_fragments c.rx_frames)
       (ratio c.rx_frames c.polls)
@@ -836,7 +949,8 @@ module Make(C: S.CONFIGURATION) = struct
       (List.length nf.t.free_pages)
       ops_per_s c.grant_ops
       (if c.grant_ops = 0 then 0.0 else grant_us /. float_of_int c.grant_ops)
-      (grant_share *. 100.0));
+      (grant_share *. 100.0)
+      c.tx_aggregated c.tx_aggregated_multi !Assemble.extras_seen);
     (* grant_ns and grant_ops are per round, so the share is of this round. *)
     c.reported_at <- c.rx_frames + c.tx_frames;
     c.last_ns <- now;
@@ -874,8 +988,14 @@ module Make(C: S.CONFIGURATION) = struct
   let mac nf = nf.t.mac
   let mtu nf = nf.t.mtu
 
+  (* An IPv4 total length is sixteen bits, so this is the most a peer could ever
+     be asked to segment, and it is above any MTU that field can describe. *)
+  let max_aggregated_frame = 65535 + Unified_TX_Ops.ethernet_header_size
+
   (* A frame length, header included, which mtu is not. See netif.mli. *)
-  let max_frame_size nf = nf.t.mtu + Unified_TX_Ops.ethernet_header_size
+  let max_frame_size nf =
+    if may_aggregate nf.t then max_aggregated_frame
+    else nf.t.mtu + Unified_TX_Ops.ethernet_header_size
 
   let get_stats_counters nf = nf.t.stats
   let reset_stats_counters nf = Mirage_net.Stats.reset nf.t.stats
