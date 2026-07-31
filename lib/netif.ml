@@ -31,6 +31,10 @@ module Log = (val Logs.src_log src : Logs.LOG)
 
 exception Netback_shutdown
 
+(* NETIF_RSP_ERROR: the response slot could not be filled and the peer must
+   discard the frame. *)
+let netif_rsp_error = -1
+
 type ending =
   | Front of {
       tx_pool: Shared_page_pool.t ;
@@ -43,6 +47,16 @@ type ending =
       rx_grants: RX.Request.t Lwt_dllist.t ;
       tx_ring : (TX.Response.t, int) Ring.Rpc.Back.t ;
       rx_ring : (RX.Response.t, int) Ring.Rpc.Back.t ;
+      (* Page aligned scratch for the transmit path. A grant copy names each
+         endpoint as a frame plus an offset, so the local source has to be page
+         aligned, which Cstruct.create does not promise. Reused across frames,
+         so unlike a fresh Io_page it does not arrive zeroed and must be
+         cleared: the marshallers expect zeroed memory. Only touched under
+         tx_mutex. *)
+      tx_scratch: Io_page.t ;
+      (* The mirror of tx_scratch, where a received fragment lands. It needs no
+         clearing: frag.size bytes go in and exactly those come out. *)
+      rx_scratch: Io_page.t ;
     }
 
 (* Cheap counters for working out where the per-packet cost goes. Only integer
@@ -208,7 +222,7 @@ module Unified_TX_Ops = struct
   (* Split [data] over as many ring slots as it needs, and describe each one to
      the peer. Returns the fragments, each paired with a thread that completes
      once the peer has answered for it. *)
-  let fragment_data t data =
+  let fragment_data t ?src_page data =
     let size = Cstruct.length data in
     match t.ending with
     | Front { tx_pool ; tx_ring = (_, client) ; _ } -> (* Frontend *)
@@ -242,35 +256,61 @@ module Unified_TX_Ops = struct
         copy_to_pages [data] true [] nfrags
 
     | Back { rx_grants ; rx_ring ; _ } -> (* Backend *)
+        let src_page =
+          match src_page with
+          | Some page -> page
+          | None ->
+              (* write always hands the backend a page aligned buffer. *)
+              invalid_arg
+                "Netif.fragment_data: the backend needs a page aligned source"
+        in
         let pages_needed = max 1 @@ Io_page.round_to_page_size size / Io_page.page_size in
         backend_get_n_grefs t rx_ring rx_grants pages_needed >>= fun reqs ->
 
-        let rec map_and_copy src acc_frags = function
-          | [] -> Lwt.return (List.rev acc_frags)
+        let rec copy_to_peer offset acc_frags = function
+          | [] -> return (List.rev acc_frags)
           | req :: rest ->
-              let gnt = {Xen_os.Xen.Import.domid = t.peer_domid;
-                         ref = Xen_os.Xen.Gntref.of_int32 req.RX.Request.gref} in
+              let to_copy = min Io_page.page_size (size - offset) in
+              (* One hypercall where map, copy and unmap took two plus the page
+                 table work. Both endpoints stay inside one page: the source is
+                 aligned and offset advances a page at a time. *)
               let before = monotonic_ns () in
-              let mapping = Xen_os.Xen.Import.map_exn gnt ~writable:true in
-              let dst = Xen_os.Xen.Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-              let len, src' = Cstruct.fillv ~src ~dst in
-              Xen_os.Xen.Import.Local_mapping.unmap_exn mapping;
-              account_grant t.counters ~before ~ops:2;
+              let copied =
+                Xen_os.Xen.Import.copy_to
+                  ~src:src_page ~src_off:(data.Cstruct.off + offset)
+                  ~domid:t.peer_domid
+                  ~gref:(Xen_os.Xen.Gntref.of_int32 req.RX.Request.gref)
+                  ~dst_off:0 ~len:to_copy
+              in
+              account_grant t.counters ~before ~ops:1;
+              (* A refused copy leaves the peer's page holding whatever was
+                 there, so announcing to_copy bytes would hand it a stale frame.
+                 Report the failure instead. *)
+              let resp_size =
+                match copied with
+                | Ok () -> Ok to_copy
+                | Error (`Msg m) ->
+                    Log.err (fun f ->
+                        f "[Backend-TX] grant copy failed for id %d: %s"
+                          req.RX.Request.id m);
+                    Error netif_rsp_error
+              in
 
               let frag = Assemble.{
-                id = req.RX.Request.id; offset = 0; size = len;
+                id = req.RX.Request.id; offset = 0; size = to_copy;
                 gref = req.RX.Request.gref;
               } in
               let has_more = (rest <> []) in
               let flags = if has_more then Flags.more_data else Flags.empty in
+
               let slot = Ring.Rpc.Back.(slot rx_ring (next_res_id rx_ring)) in
               (* Each RX response carries the size of its own fragment. *)
               let resp = { RX.Response.id = req.RX.Request.id; offset = 0;
-                           flags; size = Ok len } in
-              RX.Response.write resp slot;
-              map_and_copy src' ((frag, Lwt.return_unit) :: acc_frags) rest
+                           flags; size = resp_size } in
+              RX.Response.write resp slot
+              copy_to_peer (offset + to_copy) ((frag, Lwt.return_unit) :: acc_frags) rest
         in
-        map_and_copy [data] [] reqs
+        copy_to_peer 0 [] reqs
 
   (* Fast path for a frame that fits in a single pool block: let the caller fill
      the shared block rather than fill a private buffer and copy it in. At an
@@ -371,24 +411,31 @@ module Unified_RX_Ops = struct
          Hashtbl.remove rx_map id;
          Xen_os.Xen.Export.end_access ~release_ref:true gref >|= fun () ->
          return_page nf page)
-    | Back { tx_ring ; _ } -> (* Backend: the page is the peer's, reached through its grant *)
-      let gnt = {Xen_os.Xen.Import.domid = nf.t.peer_domid;
-                 ref = Xen_os.Xen.Gntref.of_int32 frag.Assemble.gref} in
+
+    | Back { tx_ring ; rx_scratch ; _ } -> (* Backend: the page is the peer's, reached through its grant *)
       let before = monotonic_ns () in
-      Xen_os.Xen.Import.with_mapping gnt ~writable:false (fun mapping ->
-        read (Xen_os.Xen.Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct);
-        Lwt.return_unit
-      ) >>= fun mapped ->
-      account_grant nf.t.counters ~before ~ops:2;
+      (* Only frag.size bytes move, where the mapping cost a whole page plus the
+         page table work. It lands at the offset it had in the peer's page, so
+         the caller reads it exactly where it would have. *)
+      let copied =
+        Xen_os.Xen.Import.copy_from ~domid:nf.t.peer_domid
+          ~gref:(Xen_os.Xen.Gntref.of_int32 frag.Assemble.gref)
+          ~src_off:frag.Assemble.offset ~dst:scratch
+          ~dst_off:frag.Assemble.offset ~len:frag.Assemble.size
+      in
+      account_grant nf.t.counters ~before ~ops:1;
+      (match copied with
+        | Ok () -> read (Io_page.to_cstruct scratch)
+        | Error _ -> ());
       (* Answer either way, so the peer can reuse the block whether or not we
          managed to read it. *)
       let slot = Ring.Rpc.Back.(slot tx_ring (next_res_id tx_ring)) in
       let status =
-        match mapped with Ok () -> TX.Response.OKAY | Error _ -> TX.Response.ERROR in
-      TX.Response.write {TX.Response.id = frag.Assemble.id; status} slot;
-      (match mapped with
-       | Error (`Msg m) -> Lwt.fail_with m
-       | Ok () -> Lwt.return_unit)
+        match copied with Ok () -> TX.Response.OKAY | Error _ -> TX.Response.ERROR in
+      TX.Response.write {TX.Response.id = frag.Assemble.id; status} slot
+      (match copied with
+        | Error (`Msg m) -> Lwt.fail_with m
+        | Ok () -> Lwt.return_unit)
 
   let notify_if_needed nf =
     match nf.t.ending with
@@ -486,7 +533,8 @@ module Make(C: S.CONFIGURATION) = struct
     Cleanup.push cleanup (fun () -> Xen_os.Eventchn.unbind h channel; Lwt.return_unit);
     Log.info (fun f -> f "[Backend] Bound to event channel: %s" event_channel);
     Xen_os.Eventchn.unmask h channel;
-    let ending = Back { peer_mac = frontend_mac ; rx_grants = Lwt_dllist.create () ; tx_ring ; rx_ring } in
+    let ending = Back { peer_mac = frontend_mac ; rx_grants = Lwt_dllist.create () ; tx_ring ; rx_ring ;
+                        tx_scratch = Io_page.get 1 ; rx_scratch = Io_page.get 1 } in
     Lwt.return {
       vif_id = device_id; peer_domid = domid;
       mac; mtu;
@@ -614,10 +662,29 @@ module Make(C: S.CONFIGURATION) = struct
        | _ ->
          (* Several blocks, or the backend, which writes into the peer's pages:
             marshal into a private buffer first, then split it. *)
-         let data = Cstruct.create size in
+         (* fillf writes into data. The backend also needs the page data sits
+            in: copy_to identifies its source by page number, so the buffer
+            must start on a page boundary, which only Io_page.t promises. *)
+         let data, src_page =
+           match nf.t.ending with
+           | Front _ -> (Cstruct.create size, None)
+           | Back { tx_scratch ; _ } when size <= Io_page.page_size ->
+               (* Reused, so clear what fillf is about to write over. Only len
+                  bytes ever reach the peer, so this is about the marshallers,
+                  not about leaking. *)
+               let cs = Cstruct.sub (Io_page.to_cstruct page) 0 size in
+               Cstruct.memset cs 0;
+               (cs, Some page)
+           | Back _ ->
+               (* Larger than the scratch, which needs an MTU above 4 kB. A
+                  fresh Io_page is aligned and comes zeroed. *)
+               let pages = Io_page.round_to_page_size size / Io_page.page_size in
+               let page = Io_page.get pages in
+               (Cstruct.sub (Io_page.to_cstruct page) 0 size, Some page)
+         in
          let len = fillf data in
          if len > size then failwith "length exceeds total size";
-         Unified_TX_Ops.fragment_data nf.t (Cstruct.sub data 0 len)
+         Unified_TX_Ops.fragment_data nf.t ?src_page (Cstruct.sub data 0 len)
          >|= fun fragments -> (len, fragments)) >|= fun (total_size, fragments) ->
       nf.t.counters.tx_frames <- nf.t.counters.tx_frames + 1;
       nf.t.counters.tx_fragments <- nf.t.counters.tx_fragments + List.length fragments;
