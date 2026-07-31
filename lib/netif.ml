@@ -219,9 +219,16 @@ end
    channel for more if it has not posted enough yet. *)
 let backend_get_n_grefs t n =
   let rx_grants = Option.get t.rx_grants in
+  (* Bind the head before recursing. OCaml evaluates the arguments of a
+     constructor right to left, so [take_l seq :: take seq (n - 1)] drains the
+     queue from the far end first and hands the requests back reversed. The peer
+     pairs a response with a request by ring position alone. *)
   let rec take seq = function
     | 0 -> []
-    | n -> Lwt_dllist.take_l seq :: (take seq (n - 1)) in
+    | n ->
+        let head = Lwt_dllist.take_l seq in
+        head :: take seq (n - 1)
+  in
 
   let rec loop after =
     check_open t;
