@@ -28,6 +28,15 @@ type fragment = {
 type packet = {
   total_size: int;
   fragments: fragment list;
+  (* Ring ids of the slots that extra_info descriptors consumed. Such a slot
+     cost the reader whatever a slot costs, a page on the receive ring, but
+     carries no data and yields no fragment, so nothing else would give it back.
+
+     Derived by position: a descriptor sits in the slot after the message it
+     qualifies and ids run consecutively. That only holds where the reader
+     assigned the ids, so a backend reading ids its peer chose must not use
+     these. *)
+  extra_ids: int list;
 }
 
 (* [Error frags] reports the fragments of a packet that could not be assembled,
@@ -205,6 +214,11 @@ module Make_Reader(C : CHANNEL) = struct
         (List.length rest_sizes + 1));
       Error (List.map fragment_of_msg (first_msg :: continuation_msgs))
     | Ok declared_size, (rest_sizes, []) ->
+      let extra_ids =
+        List.mapi
+          (fun k _ -> (C.id first_msg + k + 1) land 0xffff)
+          (C.extras first_msg)
+      in
       let total_size, first_fragment_size =
         C.compute_sizes_read ~declared_size ~rest_sizes in
       (* The TX subtraction goes negative if the peer announces sizes that do
@@ -223,7 +237,7 @@ module Make_Reader(C : CHANNEL) = struct
         let rest_fragments = List.map2 (fun msg size ->
           { id = C.id msg; offset = C.offset msg; size; gref = C.gref msg }
         ) continuation_msgs rest_sizes in
-        Ok { total_size; fragments = first_fragment :: rest_fragments }
+        Ok { total_size; fragments = first_fragment :: rest_fragments; extra_ids }
 
   let read_packets ?with_extras ack_fn =
     let messages = collect_messages ?with_extras ack_fn in

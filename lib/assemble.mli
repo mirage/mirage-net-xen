@@ -28,6 +28,15 @@ type fragment = {
 type packet = {
   total_size: int;
   fragments: fragment list;
+  extra_ids: int list;
+      (** Ring ids of slots consumed by extra_info descriptors. Such a slot cost
+          the reader whatever a slot costs, a page on the receive ring, but
+          carries no data and yields no fragment, so a caller that does not
+          release these leaks one per aggregated frame.
+
+          Derived by position, which is only sound where the reader assigned the
+          ids: valid for a frontend reading responses to its own requests, not
+          for a backend reading ids its peer chose. *)
 }
 
 type assembled = (packet, fragment list) result

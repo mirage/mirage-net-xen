@@ -394,6 +394,41 @@ module Unified_RX_Ops = struct
         frags;
       Lwt.return_unit
 
+  (* A descriptor occupies a ring slot without carrying data, so it never becomes
+     a fragment and nothing on the assembly path accounts for it. Both roles owe
+     something for that slot and neither is optional.
+
+     As a frontend, the slot was one of our requests, so a page of ours is behind
+     it and nothing will ask for that page again: hand it back, or the pool
+     drains by one per aggregated frame until the ring can no longer be refilled.
+
+     As a backend, the slot belongs to the peer, which attached no resource to
+     it, but it is only returned once our response index passes it. Leave that
+     undone and the peer's transmit ring fills up and it stops sending. A NULL
+     status is what says "nothing here". *)
+  let release_extra_slots nf ids =
+    match nf.t.tx_pool with
+    | Some _ -> (* Frontend: the page is ours *)
+      let rx_map = Option.get nf.t.rx_map in
+      ids |> Lwt_list.iter_s (fun id ->
+        match Hashtbl.find_opt rx_map id with
+        | None ->
+          Log.warn (fun f -> f "[Frontend-RX] no page for descriptor slot %d" id);
+          Lwt.return_unit
+        | Some (gref, page) ->
+          Hashtbl.remove rx_map id;
+          Export.end_access ~release_ref:true gref >|= fun () ->
+          return_page nf page)
+    | None -> (* Backend: only the slot, answered so the peer reclaims it *)
+      List.iter (fun _id ->
+        match nf.t.tx_ring with
+        | Back_ring bring ->
+          let slot = Ring.Rpc.Back.(slot bring (next_res_id bring)) in
+          TX.Response.write
+            { TX.Response.id = 0; status = TX.Response.NULL } slot
+        | _ -> ()) ids;
+      Lwt.return_unit
+
   (* [read] is handed the page the fragment sits in and must take what it needs
      before this returns, since the page goes back to the pool or the mapping is
      torn down straight after. That is what keeps the fragment from having to be
@@ -748,6 +783,8 @@ module Make(C: S.CONFIGURATION) = struct
         Lwt.catch (fun () ->
           Lwt.async (fun () -> callback data)
           assemble_packet packet (Unified_RX_Ops.with_page nf) >>= fun data ->
+          Unified_RX_Ops.release_extra_slots nf packet.Assemble.extra_ids
+          >>= fun () ->
           nf.t.counters.rx_frames <- nf.t.counters.rx_frames + 1;
           nf.t.counters.rx_fragments <- nf.t.counters.rx_fragments + List.length packet.Assemble.fragments;
           Stats.rx nf.t.stats (Int64.of_int packet.Assemble.total_size);
