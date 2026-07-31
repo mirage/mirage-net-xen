@@ -240,6 +240,9 @@ let backend_get_n_grefs t n =
   loop Xen_os.Activations.program_start
 
 module Unified_TX_Ops = struct
+  (* Frame lengths count this, mtu does not. The two are not interchangeable. *)
+  let ethernet_header_size = 14
+
   (* The peer answers every transmit request, and a status other than OKAY means
      the frame did not go out. *)
   let check_reply replied =
@@ -934,6 +937,9 @@ module Make(C: S.CONFIGURATION) = struct
 
   let mac nf = nf.t.mac
   let mtu nf = nf.t.mtu
+
+  (* A frame length, header included, which mtu is not. See netif.mli. *)
+  let max_frame_size nf = nf.t.mtu + Unified_TX_Ops.ethernet_header_size
 
   let get_stats_counters nf = nf.t.stats
   let reset_stats_counters nf = Mirage_net.Stats.reset nf.t.stats
