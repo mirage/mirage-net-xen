@@ -38,6 +38,10 @@ let return = Lwt.return
 
 exception Netback_shutdown
 
+(* NETIF_RSP_ERROR: the response slot could not be filled and the peer must
+   discard the frame. *)
+let netif_rsp_error = -1
+
 type 'a ring_side =
   | Front_ring of ('a, int) Ring.Rpc.Front.t * ('a, int) Lwt_ring.Front.t
   | Back_ring of ('a, int) Ring.Rpc.Back.t
@@ -92,9 +96,18 @@ type transport = {
   tx_gnt: Gntref.t;
   tx_mutex: Lwt_mutex.t;
   tx_pool: Shared_page_pool.t option;
+  (* Page aligned scratch for the backend transmit path. A grant copy names each
+     endpoint as a frame plus an offset, so the local source has to be page
+     aligned, which Cstruct.create does not promise. Reused across frames, so
+     unlike a fresh Io_page it does not arrive zeroed and must be cleared: the
+     marshallers expect zeroed memory. Only touched under tx_mutex. *)
+  tx_scratch: Io_page.t option;
 
   rx_ring: RX.Response.t ring_side;
   rx_gnt: Gntref.t;
+  (* The mirror of tx_scratch, where a received fragment lands. It needs no
+     clearing: frag.size bytes go in and exactly those come out. *)
+  rx_scratch: Io_page.t option;
   rx_grants: RX.Request.t Lwt_dllist.t option;
   rx_map: (int, Gntref.t * Io_page.t) Hashtbl.t option;
   mutable rx_id: int;
@@ -241,7 +254,7 @@ module Unified_TX_Ops = struct
   (* Split [data] over as many ring slots as it needs, and describe each one to
      the peer. Returns the fragments, each paired with a thread that completes
      once the peer has answered for it. *)
-  let fragment_data t data =
+  let fragment_data t ?src_page data =
     let size = Cstruct.length data in
     match t.tx_pool with
     | Some tx_pool -> (* Frontend *)
@@ -279,23 +292,48 @@ module Unified_TX_Ops = struct
         copy_to_pages [data] true [] nfrags
 
     | None -> (* Backend *)
+        let src_page =
+          match src_page with
+          | Some page -> page
+          | None ->
+              (* write always hands the backend a page aligned buffer. *)
+              invalid_arg
+                "Netif.fragment_data: the backend needs a page aligned source"
+        in
         let pages_needed = max 1 @@ Io_page.round_to_page_size size / Io_page.page_size in
         backend_get_n_grefs t pages_needed >>= fun reqs ->
 
-        let rec map_and_copy src acc_frags = function
+        let rec copy_to_peer offset acc_frags = function
           | [] -> return (List.rev acc_frags)
           | req :: rest ->
-              let gnt = {Import.domid = t.peer_domid;
-                         ref = Gntref.of_int32 req.RX.Request.gref} in
+              let to_copy = min Io_page.page_size (size - offset) in
+              (* One hypercall where map, copy and unmap took two plus the page
+                 table work. Both endpoints stay inside one page: the source is
+                 aligned and offset advances a page at a time. *)
               let before = monotonic_ns () in
-              let mapping = Import.map_exn gnt ~writable:true in
-              let dst = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
-              let len, src' = Cstruct.fillv ~src ~dst in
-              Import.Local_mapping.unmap_exn mapping;
-              account_grant t.counters ~before ~ops:2;
+              let copied =
+                Import.copy_to
+                  ~src:src_page ~src_off:(data.Cstruct.off + offset)
+                  ~domid:t.peer_domid
+                  ~gref:(Gntref.of_int32 req.RX.Request.gref)
+                  ~dst_off:0 ~len:to_copy
+              in
+              account_grant t.counters ~before ~ops:1;
+              (* A refused copy leaves the peer's page holding whatever was
+                 there, so announcing to_copy bytes would hand it a stale frame.
+                 Report the failure instead. *)
+              let resp_size =
+                match copied with
+                | Ok () -> Ok to_copy
+                | Error (`Msg m) ->
+                    Log.err (fun f ->
+                        f "[Backend-TX] grant copy failed for id %d: %s"
+                          req.RX.Request.id m);
+                    Error netif_rsp_error
+              in
 
               let frag = Assemble.{
-                id = req.RX.Request.id; offset = 0; size = len;
+                id = req.RX.Request.id; offset = 0; size = to_copy;
                 gref = req.RX.Request.gref;
               } in
               let has_more = (rest <> []) in
@@ -305,12 +343,13 @@ module Unified_TX_Ops = struct
                    let slot = Ring.Rpc.Back.(slot bring (next_res_id bring)) in
                    (* Each RX response carries the size of its own fragment. *)
                    let resp = { RX.Response.id = req.RX.Request.id; offset = 0;
-                                flags; size = Ok len } in
+                                flags; size = resp_size } in
                    RX.Response.write resp slot
                | _ -> assert false);
-              map_and_copy src' ((frag, Lwt.return_unit) :: acc_frags) rest
+              copy_to_peer (offset + to_copy)
+                ((frag, Lwt.return_unit) :: acc_frags) rest
         in
-        map_and_copy [data] [] reqs
+        copy_to_peer 0 [] reqs
 
   (* Fast path for a frame that fits in a single pool block: let the caller fill
      the shared block rather than fill a private buffer and copy it in. At an
@@ -421,25 +460,36 @@ module Unified_RX_Ops = struct
          Export.end_access ~release_ref:true gref >|= fun () ->
          return_page nf page)
 
-    | None -> (* Backend: the page is the peer's, reached through its grant *)
-      let gnt = {Import.domid = nf.t.peer_domid;
-                 ref = Gntref.of_int32 frag.Assemble.gref} in
+    | None -> (* Backend: the hypervisor copies the peer's page to our scratch *)
+      let scratch =
+        match nf.t.rx_scratch with
+        | Some page -> page
+        | None -> invalid_arg "Netif.with_page: the backend needs a landing page"
+      in
       let before = monotonic_ns () in
-      Import.with_mapping gnt ~writable:false (fun mapping ->
-        read (Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct);
-        return ()
-      ) >>= fun mapped ->
-      account_grant nf.t.counters ~before ~ops:2;
+      (* Only frag.size bytes move, where the mapping cost a whole page plus the
+         page table work. It lands at the offset it had in the peer's page, so
+         the caller reads it exactly where it would have. *)
+      let copied =
+        Import.copy_from ~domid:nf.t.peer_domid
+          ~gref:(Gntref.of_int32 frag.Assemble.gref)
+          ~src_off:frag.Assemble.offset ~dst:scratch
+          ~dst_off:frag.Assemble.offset ~len:frag.Assemble.size
+      in
+      account_grant nf.t.counters ~before ~ops:1;
+      (match copied with
+       | Ok () -> read (Io_page.to_cstruct scratch)
+       | Error _ -> ());
       (* Answer either way, so the peer can reuse the block whether or not we
          managed to read it. *)
       (match nf.t.tx_ring with
        | Back_ring bring ->
            let slot = Ring.Rpc.Back.(slot bring (next_res_id bring)) in
            let status =
-             match mapped with Ok () -> TX.Response.OKAY | Error _ -> TX.Response.ERROR in
+             match copied with Ok () -> TX.Response.OKAY | Error _ -> TX.Response.ERROR in
            TX.Response.write {TX.Response.id = frag.Assemble.id; status} slot
        | _ -> ());
-      (match mapped with
+      (match copied with
        | Error (`Msg m) -> Lwt.fail_with m
        | Ok () -> Lwt.return_unit)
 
@@ -521,7 +571,8 @@ module Make(C: S.CONFIGURATION) = struct
       vif_id; peer_domid = backend_id;
       mac; peer_mac = None; mtu;
       tx_ring; tx_gnt; tx_mutex = Lwt_mutex.create (); tx_pool = Some tx_pool;
-      rx_ring; rx_gnt;
+      tx_scratch = None;
+      rx_ring; rx_gnt; rx_scratch = None;
       rx_grants = None; rx_map = Some (Hashtbl.create 256); rx_id = 0;
       free_pages = Io_page.to_pages (Io_page.get 256);
       evtchn; stats = Mirage_net.Stats.create (); counters = new_counters ();
@@ -550,7 +601,9 @@ module Make(C: S.CONFIGURATION) = struct
       mac; peer_mac = Some frontend_mac; mtu;
       tx_ring; tx_gnt = Gntref.of_int32 tx_ring_ref;
       tx_mutex = Lwt_mutex.create (); tx_pool = None;
+      tx_scratch = Some (Io_page.get 1);
       rx_ring; rx_gnt = Gntref.of_int32 rx_ring_ref;
+      rx_scratch = Some (Io_page.get 1);
       rx_grants = Some (Lwt_dllist.create ()); rx_map = None; rx_id = 0;
       free_pages = [];
       evtchn = channel; stats = Mirage_net.Stats.create ();
@@ -674,10 +727,29 @@ module Make(C: S.CONFIGURATION) = struct
        else begin
          (* Several blocks, or the backend, which writes into the peer's pages:
             marshal into a private buffer first, then split it. *)
-         let data = Cstruct.create size in
+         (* fillf writes into data. The backend also needs the page data sits
+            in: copy_to identifies its source by page number, so the buffer
+            must start on a page boundary, which only Io_page.t promises. *)
+         let data, src_page =
+           match nf.t.tx_scratch with
+           | None -> (Cstruct.create size, None)
+           | Some page when size <= Io_page.page_size ->
+               (* Reused, so clear what fillf is about to write over. Only len
+                  bytes ever reach the peer, so this is about the marshallers,
+                  not about leaking. *)
+               let cs = Cstruct.sub (Io_page.to_cstruct page) 0 size in
+               Cstruct.memset cs 0;
+               (cs, Some page)
+           | Some _ ->
+               (* Larger than the scratch, which needs an MTU above 4 kB. A
+                  fresh Io_page is aligned and comes zeroed. *)
+               let pages = Io_page.round_to_page_size size / Io_page.page_size in
+               let page = Io_page.get pages in
+               (Cstruct.sub (Io_page.to_cstruct page) 0 size, Some page)
+         in
          let len = fillf data in
          if len > size then failwith "length exceeds total size";
-         Unified_TX_Ops.fragment_data nf.t (Cstruct.sub data 0 len)
+         Unified_TX_Ops.fragment_data nf.t ?src_page (Cstruct.sub data 0 len)
          >|= fun fragments -> (len, fragments)
        end) >|= fun (total_size, fragments) ->
       nf.t.counters.tx_frames <- nf.t.counters.tx_frames + 1;
