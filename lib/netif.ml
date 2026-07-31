@@ -692,9 +692,12 @@ module Make(C: S.CONFIGURATION) = struct
         Unified_RX_Ops.discard_fragments nf frags
       | Ok packet ->
         Lwt.catch (fun () ->
-          assemble_packet packet (Unified_RX_Ops.with_page nf) >|= fun data ->
+          assemble_packet packet (Unified_RX_Ops.with_page nf) >>= fun data ->
           Stats.rx (Unified_RX_Ops.get_stats nf) (Int64.of_int packet.Assemble.total_size);
-          Lwt.async (fun () -> callback data)
+          (* Lwt.async here would let the next frame start before this one has
+             finished, and would put the callback outside the catch below. The
+             pages are already back in the pool, so waiting holds nothing. *)
+          callback data
         ) (fun ex ->
           Log.err (fun f -> f "[%s-RX] Callback FAILED with exception: %s"
             (direction nf) (Printexc.to_string ex));
