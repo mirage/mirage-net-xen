@@ -661,7 +661,6 @@ module Make(C: S.CONFIGURATION) = struct
         Cstruct.blit buf frag.offset data !next frag.size;
         next := !next + frag.size)
     ) >|= fun () ->
-    assert (!next = Cstruct.length data);
     data
 
   let direction nf = match nf.t.tx_pool with Some _ -> "Frontend" | None -> "Backend"
