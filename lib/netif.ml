@@ -480,22 +480,21 @@ module Make(C: S.CONFIGURATION) = struct
   let create_backend ~cleanup ~domid ~device_id ~frontend_mac ~mac ~mtu
       ~tx_ring_ref ~rx_ring_ref ~event_channel =
     Log.info (fun f -> f "[Backend] Creating: domid=%d device_id=%d" domid device_id);
-    let frontend_id = domid in
-    backend_import_ring ~domid:frontend_id ~gntref:(Xen_os.Xen.Gntref.of_int32 tx_ring_ref)
+    backend_import_ring ~domid ~gntref:(Xen_os.Xen.Gntref.of_int32 tx_ring_ref)
       ~idx_size:TX.total_size "Netif.Backend.TX" true
     >>= fun (tx_ring, tx_mapping) ->
     Cleanup.push cleanup (fun () -> Xen_os.Xen.Import.Local_mapping.unmap_exn tx_mapping; Lwt.return_unit);
-    backend_import_ring ~domid:frontend_id ~gntref:(Xen_os.Xen.Gntref.of_int32 rx_ring_ref)
+    backend_import_ring ~domid ~gntref:(Xen_os.Xen.Gntref.of_int32 rx_ring_ref)
       ~idx_size:RX.total_size "Netif.Backend.RX" true
     >>= fun (rx_ring, rx_mapping) ->
     Cleanup.push cleanup (fun () -> Xen_os.Xen.Import.Local_mapping.unmap_exn rx_mapping; Lwt.return_unit);
-    let channel = Xen_os.Eventchn.bind_interdomain h frontend_id
+    let channel = Xen_os.Eventchn.bind_interdomain h domid
         (int_of_string event_channel) in
     Cleanup.push cleanup (fun () -> Xen_os.Eventchn.unbind h channel; Lwt.return_unit);
     Log.info (fun f -> f "[Backend] Bound to event channel: %s" event_channel);
     Xen_os.Eventchn.unmask h channel;
     Lwt.return {
-      vif_id = device_id; peer_domid = frontend_id;
+      vif_id = device_id; peer_domid = domid;
       mac; peer_mac = Some frontend_mac; mtu;
       tx_ring; tx_gnt = Xen_os.Xen.Gntref.of_int32 tx_ring_ref;
       tx_mutex = Lwt_mutex.create (); tx_pool = None;
@@ -522,7 +521,8 @@ module Make(C: S.CONFIGURATION) = struct
     C.connect id >>= fun () ->
     C.wait_until_backend_connected backend_conf >>= fun () ->
     (* packets are dropped until listen is called *)
-    Log.info (fun f -> f "[Frontend] Connected to backend");
+    Log.info (fun f -> f "[Frontend] Connected to backend dom:%d/vif:%d"
+      backend_id vif_id);
     let get_rx_grants t n =
       let rec take acc n l = match n, l with
         | 0, rest -> (acc, rest)
@@ -547,10 +547,7 @@ module Make(C: S.CONFIGURATION) = struct
   let connect id =
     (* If [id] is an integer, use it. Otherwise, return an error message
        which enumerates the available interfaces. *)
-    let id' =
-      try Some (int_of_string id) with _ -> None
-    in
-    match id' with
+    match int_of_string_opt id with
     | Some id' -> begin
         if Hashtbl.mem devices id' then
           Lwt.return (Hashtbl.find devices id')
@@ -630,7 +627,7 @@ module Make(C: S.CONFIGURATION) = struct
        end) >|= fun (total_size, fragments) ->
       Unified_TX_Ops.notify_if_needed nf.t;
       Stats.tx (Unified_TX_Ops.get_stats nf.t) (Int64.of_int total_size);
-      Lwt.join (List.map (fun (_, release) -> release) fragments))
+      Lwt.join (List.map snd fragments))
 
   let rec write nf ~size fillf =
     match nf.t.tx_pool with
