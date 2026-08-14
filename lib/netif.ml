@@ -27,14 +27,8 @@
 
 open Lwt.Infix
 
-module Gntref = Xen_os.Xen.Gntref
-module Export = Xen_os.Xen.Export
-module Import = Xen_os.Xen.Import
-
 let src = Logs.Src.create "net-xen channel" ~doc:"Unified Xen network channel"
 module Log = (val Logs.src_log src : Logs.LOG)
-
-let return = Lwt.return
 
 exception Netback_shutdown
 
@@ -50,14 +44,14 @@ type transport = {
   mtu: int;
 
   tx_ring: TX.Response.t ring_side;
-  tx_gnt: Gntref.t;
+  tx_gnt: Xen_os.Xen.Gntref.t;
   tx_mutex: Lwt_mutex.t;
   tx_pool: Shared_page_pool.t option;
 
   rx_ring: RX.Response.t ring_side;
-  rx_gnt: Gntref.t;
+  rx_gnt: Xen_os.Xen.Gntref.t;
   rx_grants: RX.Request.t Lwt_dllist.t option;
-  rx_map: (int, Gntref.t * Io_page.t) Hashtbl.t option;
+  rx_map: (int, Xen_os.Xen.Gntref.t * Io_page.t) Hashtbl.t option;
   mutable rx_id: int;
   mutable free_pages: Io_page.t list;
 
@@ -71,7 +65,7 @@ type transport = {
 (* Only the frontend has anything to do here: it owns the pages behind the
    receive ring and grants fresh ones as the ring is refilled. *)
 type grant_ops = {
-  get_rx_grants: transport -> int -> (Gntref.t * Io_page.t) list Lwt.t;
+  get_rx_grants: transport -> int -> (Xen_os.Xen.Gntref.t * Io_page.t) list Lwt.t;
 }
 
 type t = {
@@ -116,25 +110,25 @@ let h = Xen_os.Eventchn.init ()
 let frontend_allocate_ring ~domid =
   let page = Io_page.get 1 in
   let x = Io_page.to_cstruct page in
-  Export.get () >>= fun gnt ->
+  Xen_os.Xen.Export.get () >>= fun gnt ->
   Cstruct.memset x 0;
-  Export.grant_access ~domid ~writable:true gnt page;
-  return (gnt, x, page)
+  Xen_os.Xen.Export.grant_access ~domid ~writable:true gnt page;
+  Lwt.return (gnt, x, page)
 
 let frontend_create_ring ~domid ~idx_size name =
   frontend_allocate_ring ~domid >>= fun (gnt, buf, page) ->
   let sring = Ring.Rpc.of_buf ~buf ~idx_size ~name in
   let fring = Ring.Rpc.Front.init ~sring in
   let client = Lwt_ring.Front.init string_of_int fring in
-  return (gnt, Front_ring (fring, client), page)
+  Lwt.return (gnt, Front_ring (fring, client), page)
 
 let backend_import_ring ~domid ~gntref ~idx_size name writable =
-  let grant = {Import.domid; ref = gntref} in
-  let mapping = Import.map_exn grant ~writable in
-  let buf = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+  let grant = {Xen_os.Xen.Import.domid; ref = gntref} in
+  let mapping = Xen_os.Xen.Import.map_exn grant ~writable in
+  let buf = Xen_os.Xen.Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
   let sring = Ring.Rpc.of_buf_no_init ~buf ~idx_size ~name in
   let bring = Ring.Rpc.Back.init ~sring in
-  return (Back_ring bring, mapping)
+  Lwt.return (Back_ring bring, mapping)
 
 module Ring_ops = struct
   let next_req_id = function
@@ -173,7 +167,7 @@ let backend_get_n_grefs t n =
   let rec loop after =
     check_open t;
     let n' = Lwt_dllist.length rx_grants in
-    if n' >= n then return (take rx_grants n)
+    if n' >= n then Lwt.return (take rx_grants n)
     else begin
       Ring_ops.ack t.rx_ring (fun slot ->
         let req = RX.Request.read slot in
@@ -196,7 +190,7 @@ module Unified_TX_Ops = struct
     | DROPPED -> failwith "Netif: backend dropped our frame"
     | NULL -> failwith "Netif: NULL response"
     | ERROR -> failwith "Netif: ERROR response"
-    | OKAY -> return ()
+    | OKAY -> Lwt.return_unit
 
   (* Split [data] over as many ring slots as it needs, and describe each one to
      the peer. Returns the fragments, each paired with a thread that completes
@@ -209,13 +203,13 @@ module Unified_TX_Ops = struct
         Ring_ops.wait_for_free t.tx_ring nfrags >>= fun () ->
 
         let rec copy_to_pages datav is_first acc_frags = function
-          | 0 -> return (List.rev acc_frags)
+          | 0 -> Lwt.return (List.rev acc_frags)
           | n ->
               Shared_page_pool.use tx_pool (fun ~id gref shared_block ->
                 let len, datav' = Cstruct.fillv ~src:datav ~dst:shared_block in
                 let frag = Assemble.{
                   id; offset = shared_block.Cstruct.off; size = len;
-                  gref = Gntref.to_int32 gref;
+                  gref = Xen_os.Xen.Gntref.to_int32 gref;
                 } in
                 match t.tx_ring with
                  | Front_ring (_, client) ->
@@ -224,15 +218,15 @@ module Unified_TX_Ops = struct
                         their own fragment. *)
                      let request_size = if is_first && nfrags > 1 then size else len in
                      let flags = if has_more then Flags.more_data else Flags.empty in
-                     let request = { TX.Request.id; gref = Gntref.to_int32 gref;
+                     let request = { TX.Request.id; gref = Xen_os.Xen.Gntref.to_int32 gref;
                                      offset = shared_block.Cstruct.off; flags;
                                      size = request_size } in
                      Lwt_ring.Front.write client (fun slot ->
                        TX.Request.write request slot; id
                      ) >>= fun replied ->
-                     return ((datav', frag), check_reply replied)
+                     Lwt.return ((datav', frag), check_reply replied)
                  | _ ->
-                     return ((datav', frag), Lwt.return_unit)
+                     Lwt.return ((datav', frag), Lwt.return_unit)
               ) >>= fun ((datav', frag), release) ->
               copy_to_pages datav' false ((frag, release) :: acc_frags) (n - 1)
         in
@@ -243,14 +237,14 @@ module Unified_TX_Ops = struct
         backend_get_n_grefs t pages_needed >>= fun reqs ->
 
         let rec map_and_copy src acc_frags = function
-          | [] -> return (List.rev acc_frags)
+          | [] -> Lwt.return (List.rev acc_frags)
           | req :: rest ->
-              let gnt = {Import.domid = t.peer_domid;
-                         ref = Gntref.of_int32 req.RX.Request.gref} in
-              let mapping = Import.map_exn gnt ~writable:true in
-              let dst = Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
+              let gnt = {Xen_os.Xen.Import.domid = t.peer_domid;
+                         ref = Xen_os.Xen.Gntref.of_int32 req.RX.Request.gref} in
+              let mapping = Xen_os.Xen.Import.map_exn gnt ~writable:true in
+              let dst = Xen_os.Xen.Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct in
               let len, src' = Cstruct.fillv ~src ~dst in
-              Import.Local_mapping.unmap_exn mapping;
+              Xen_os.Xen.Import.Local_mapping.unmap_exn mapping;
 
               let frag = Assemble.{
                 id = req.RX.Request.id; offset = 0; size = len;
@@ -286,18 +280,18 @@ module Unified_TX_Ops = struct
           if len > size then failwith "length exceeds size";
           let frag = Assemble.{
             id; offset = shared_block.Cstruct.off; size = len;
-            gref = Gntref.to_int32 gref;
+            gref = Xen_os.Xen.Gntref.to_int32 gref;
           } in
           match t.tx_ring with
           | Front_ring (_, client) ->
-              let request = { TX.Request.id; gref = Gntref.to_int32 gref;
+              let request = { TX.Request.id; gref = Xen_os.Xen.Gntref.to_int32 gref;
                               offset = shared_block.Cstruct.off;
                               flags = Flags.empty; size = len } in
               Lwt_ring.Front.write client (fun slot ->
                 TX.Request.write request slot; id
               ) >>= fun replied ->
-              return ((len, frag), check_reply replied)
-          | _ -> return ((len, frag), Lwt.return_unit)
+              Lwt.return ((len, frag), check_reply replied)
+          | _ -> Lwt.return ((len, frag), Lwt.return_unit)
         ) >|= fun ((len, frag), release) ->
         (len, [ (frag, release) ])
     | None -> assert false (* guarded by the caller *)
@@ -348,7 +342,7 @@ module Unified_RX_Ops = struct
           Lwt.return_unit
         | Some (gref, page) ->
           Hashtbl.remove rx_map id;
-          Export.end_access ~release_ref:true gref >|= fun () ->
+          Xen_os.Xen.Export.end_access ~release_ref:true gref >|= fun () ->
           return_page nf page)
     | None -> (* Backend: answer so the peer can reuse its blocks *)
       List.iter (fun frag ->
@@ -376,15 +370,15 @@ module Unified_RX_Ops = struct
        | Some (gref, page) ->
          read (Io_page.to_cstruct page);
          Hashtbl.remove rx_map id;
-         Export.end_access ~release_ref:true gref >|= fun () ->
+         Xen_os.Xen.Export.end_access ~release_ref:true gref >|= fun () ->
          return_page nf page)
 
     | None -> (* Backend: the page is the peer's, reached through its grant *)
-      let gnt = {Import.domid = nf.t.peer_domid;
-                 ref = Gntref.of_int32 frag.Assemble.gref} in
-      Import.with_mapping gnt ~writable:false (fun mapping ->
-        read (Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct);
-        return ()
+      let gnt = {Xen_os.Xen.Import.domid = nf.t.peer_domid;
+                 ref = Xen_os.Xen.Gntref.of_int32 frag.Assemble.gref} in
+      Xen_os.Xen.Import.with_mapping gnt ~writable:false (fun mapping ->
+        read (Xen_os.Xen.Import.Local_mapping.to_buf mapping |> Io_page.to_cstruct);
+        Lwt.return_unit
       ) >>= fun mapped ->
       (* Answer either way, so the peer can reuse the block whether or not we
          managed to read it. *)
@@ -435,7 +429,7 @@ module Unified_RX_Ops = struct
           let id = next () in
           let slot = Ring_ops.slot nf.t.rx_ring (Ring_ops.next_req_id nf.t.rx_ring) in
           Hashtbl.add rx_map id (gnt, page);
-          RX.Request.(write {RX.Request.id; gref = Gntref.to_int32 gnt}) slot
+          RX.Request.(write {RX.Request.id; gref = Xen_os.Xen.Gntref.to_int32 gnt}) slot
         ) grants;
         Lwt.return_unit
 
@@ -471,9 +465,9 @@ module Make(C: S.CONFIGURATION) = struct
     Log.info (fun f -> f "[Frontend] Event channel: %d"
       (Xen_os.Eventchn.to_int evtchn));
     Xen_os.Eventchn.unmask h evtchn;
-    let grant_tx_page = Export.grant_access ~domid:backend_id ~writable:false in
+    let grant_tx_page = Xen_os.Xen.Export.grant_access ~domid:backend_id ~writable:false in
     let tx_pool = Shared_page_pool.make grant_tx_page in
-    return {
+    Lwt.return {
       vif_id; peer_domid = backend_id;
       mac; peer_mac = None; mtu;
       tx_ring; tx_gnt; tx_mutex = Lwt_mutex.create (); tx_pool = Some tx_pool;
@@ -487,25 +481,25 @@ module Make(C: S.CONFIGURATION) = struct
       ~tx_ring_ref ~rx_ring_ref ~event_channel =
     Log.info (fun f -> f "[Backend] Creating: domid=%d device_id=%d" domid device_id);
     let frontend_id = domid in
-    backend_import_ring ~domid:frontend_id ~gntref:(Gntref.of_int32 tx_ring_ref)
+    backend_import_ring ~domid:frontend_id ~gntref:(Xen_os.Xen.Gntref.of_int32 tx_ring_ref)
       ~idx_size:TX.total_size "Netif.Backend.TX" true
     >>= fun (tx_ring, tx_mapping) ->
-    Cleanup.push cleanup (fun () -> Import.Local_mapping.unmap_exn tx_mapping; return ());
-    backend_import_ring ~domid:frontend_id ~gntref:(Gntref.of_int32 rx_ring_ref)
+    Cleanup.push cleanup (fun () -> Xen_os.Xen.Import.Local_mapping.unmap_exn tx_mapping; Lwt.return_unit);
+    backend_import_ring ~domid:frontend_id ~gntref:(Xen_os.Xen.Gntref.of_int32 rx_ring_ref)
       ~idx_size:RX.total_size "Netif.Backend.RX" true
     >>= fun (rx_ring, rx_mapping) ->
-    Cleanup.push cleanup (fun () -> Import.Local_mapping.unmap_exn rx_mapping; return ());
+    Cleanup.push cleanup (fun () -> Xen_os.Xen.Import.Local_mapping.unmap_exn rx_mapping; Lwt.return_unit);
     let channel = Xen_os.Eventchn.bind_interdomain h frontend_id
         (int_of_string event_channel) in
-    Cleanup.push cleanup (fun () -> Xen_os.Eventchn.unbind h channel; return ());
+    Cleanup.push cleanup (fun () -> Xen_os.Eventchn.unbind h channel; Lwt.return_unit);
     Log.info (fun f -> f "[Backend] Bound to event channel: %s" event_channel);
     Xen_os.Eventchn.unmask h channel;
-    return {
+    Lwt.return {
       vif_id = device_id; peer_domid = frontend_id;
       mac; peer_mac = Some frontend_mac; mtu;
-      tx_ring; tx_gnt = Gntref.of_int32 tx_ring_ref;
+      tx_ring; tx_gnt = Xen_os.Xen.Gntref.of_int32 tx_ring_ref;
       tx_mutex = Lwt_mutex.create (); tx_pool = None;
-      rx_ring; rx_gnt = Gntref.of_int32 rx_ring_ref;
+      rx_ring; rx_gnt = Xen_os.Xen.Gntref.of_int32 rx_ring_ref;
       rx_grants = Some (Lwt_dllist.create ()); rx_map = None; rx_id = 0;
       free_pages = [];
       evtchn = channel; stats = Mirage_net.Stats.create (); closed = false;
@@ -519,8 +513,8 @@ module Make(C: S.CONFIGURATION) = struct
     C.read_mtu id >>= fun mtu ->
     create_frontend ~vif_id ~backend_id ~mac ~mtu >>= fun transport ->
     let front_conf = { S.
-      tx_ring_ref = Gntref.to_int32 transport.tx_gnt;
-      rx_ring_ref = Gntref.to_int32 transport.rx_gnt;
+      tx_ring_ref = Xen_os.Xen.Gntref.to_int32 transport.tx_gnt;
+      rx_ring_ref = Xen_os.Xen.Gntref.to_int32 transport.rx_gnt;
       event_channel = string_of_int (Xen_os.Eventchn.to_int transport.evtchn);
       feature_requests = Features.supported;
     } in
@@ -538,12 +532,12 @@ module Make(C: S.CONFIGURATION) = struct
       let to_grant, remaining = take [] n t.free_pages in
       t.free_pages <- remaining;
       Lwt_list.map_s (fun page ->
-        Export.get () >>= fun gnt ->
-        Export.grant_access ~domid:backend_id ~writable:true gnt page;
-        return (gnt, page)
+        Xen_os.Xen.Export.get () >>= fun gnt ->
+        Xen_os.Xen.Export.grant_access ~domid:backend_id ~writable:true gnt page;
+        Lwt.return (gnt, page)
       ) to_grant
     in
-    return {
+    Lwt.return {
       t = transport;
       l = Lwt_mutex.create ();
       c = Lwt_condition.create ();
@@ -559,12 +553,12 @@ module Make(C: S.CONFIGURATION) = struct
     match id' with
     | Some id' -> begin
         if Hashtbl.mem devices id' then
-          return (Hashtbl.find devices id')
+          Lwt.return (Hashtbl.find devices id')
         else begin
           Log.info (fun f -> f "connect %d" id');
           plug_frontend id' >>= fun dev ->
           Hashtbl.add devices id' dev;
-          return dev
+          Lwt.return dev
         end
       end
     | None ->
@@ -598,18 +592,18 @@ module Make(C: S.CONFIGURATION) = struct
       t = transport;
       l = Lwt_mutex.create ();
       c = Lwt_condition.create ();
-      grant_ops = { get_rx_grants = (fun _t _n -> return []) }
+      grant_ops = { get_rx_grants = (fun _t _n -> Lwt.return []) }
     } in
     (* Last pushed, first performed: stop anyone touching the rings before they
        are unmapped. *)
-    Cleanup.push cleanup (fun () -> transport.closed <- true; return ());
+    Cleanup.push cleanup (fun () -> transport.closed <- true; Lwt.return_unit);
     Lwt.async (fun () ->
       C.wait_for_frontend_closing id >>= fun () ->
       Log.info (fun f -> f "Frontend asked to close network device dom:%d/vif:%d"
         domid device_id);
       Lwt_switch.turn_off switch
     );
-    return dev
+    Lwt.return dev
 
   let make_backend ~domid ~device_id =
     let switch = Lwt_switch.create () in
@@ -646,20 +640,20 @@ module Make(C: S.CONFIGURATION) = struct
       Lwt.catch
         (fun () -> write_locked nf ~size fillf >|= fun _released -> Ok ())
         (function
-          | Netback_shutdown -> return (Error `Disconnected)
+          | Netback_shutdown -> Lwt.return (Error `Disconnected)
           | ex -> Lwt.fail ex)
     | Some _ ->
       Lwt.catch
         (fun () -> write_locked nf ~size fillf)
         (function
-          | Lwt_ring.Shutdown -> return (Lwt.fail Lwt_ring.Shutdown)
+          | Lwt_ring.Shutdown -> Lwt.return (Lwt.fail Lwt_ring.Shutdown)
           | e -> Lwt.fail e)
       >>= fun released ->
       Lwt.on_failure released (function
           | Lwt_ring.Shutdown -> ignore (write nf ~size fillf)
           | ex -> raise ex
         );
-      return (Ok ())
+      Lwt.return (Ok ())
 
   let assemble_packet packet with_page_fn =
     let open Assemble in
@@ -740,9 +734,9 @@ module Make(C: S.CONFIGURATION) = struct
       (* TODO: free pages still in [nf.t.rx_map] *)
       Shared_page_pool.shutdown tx_pool;
       Hashtbl.remove devices nf.t.vif_id;
-      return ()
+      Lwt.return_unit
     | None ->
       (* The switch created by [make_backend] performs the teardown. *)
       nf.t.closed <- true;
-      return ()
+      Lwt.return_unit
 end

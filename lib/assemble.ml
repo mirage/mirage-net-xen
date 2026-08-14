@@ -15,7 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  *)
 
-let src = Logs.Src.create "assemble" ~doc:"Packet assembly debugging"
+let src = Logs.Src.create "assemble" ~doc:"mirage-net-xen.assemble"
 module Log = (val Logs.src_log src : Logs.LOG)
 
 type fragment = {
