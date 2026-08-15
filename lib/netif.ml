@@ -27,7 +27,7 @@
 
 open Lwt.Infix
 
-let src = Logs.Src.create "net-xen channel" ~doc:"Unified Xen network channel"
+let src = Logs.Src.create "net-xen channel" ~doc:"mirage-net-xen.netif"
 module Log = (val Logs.src_log src : Logs.LOG)
 
 exception Netback_shutdown
