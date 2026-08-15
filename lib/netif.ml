@@ -22,8 +22,7 @@
    TX and RX are named from the frontend's point of view throughout, so the
    backend receives on TX and transmits on RX. The frontend owns every shared
    page; the backend allocates none and reaches them through grants. That
-   asymmetry is what [tx_pool] distinguishes: [Some] on the frontend, [None] on
-   the backend. *)
+   asymmetry is what [ending] distinguishes. *)
 
 open Lwt.Infix
 
@@ -36,22 +35,28 @@ type 'a ring_side =
   | Front_ring of ('a, int) Ring.Rpc.Front.t * ('a, int) Lwt_ring.Front.t
   | Back_ring of ('a, int) Ring.Rpc.Back.t
 
+type ending =
+  | Front of {
+      tx_pool: Shared_page_pool.t ;
+      rx_map: (int, Xen_os.Xen.Gntref.t * Io_page.t) Hashtbl.t
+    }
+  | Back of {
+      peer_mac: Macaddr.t ;
+      rx_grants: RX.Request.t Lwt_dllist.t
+    }
+
 type transport = {
   vif_id: int;
   peer_domid: int;
   mac: Macaddr.t;
-  peer_mac: Macaddr.t option;
   mtu: int;
 
   tx_ring: TX.Response.t ring_side;
   tx_gnt: Xen_os.Xen.Gntref.t;
   tx_mutex: Lwt_mutex.t;
-  tx_pool: Shared_page_pool.t option;
 
   rx_ring: RX.Response.t ring_side;
   rx_gnt: Xen_os.Xen.Gntref.t;
-  rx_grants: RX.Request.t Lwt_dllist.t option;
-  rx_map: (int, Xen_os.Xen.Gntref.t * Io_page.t) Hashtbl.t option;
   mutable rx_id: int;
   mutable free_pages: Io_page.t list;
 
@@ -60,6 +65,7 @@ type transport = {
   (* Set once the rings have been unmapped. The backend rings are the peer's
      pages and touching them after that is a use after free. *)
   mutable closed: bool;
+  ending : ending;
 }
 
 type t = {
@@ -192,8 +198,8 @@ module Unified_TX_Ops = struct
      once the peer has answered for it. *)
   let fragment_data t data =
     let size = Cstruct.length data in
-    match t.tx_pool, t.rx_grants with
-    | Some tx_pool, _ -> (* Frontend *)
+    match t.ending with
+    | Front { tx_pool ; _ } -> (* Frontend *)
         let nfrags = Shared_page_pool.blocks_needed size in
         Ring_ops.wait_for_free t.tx_ring nfrags >>= fun () ->
 
@@ -227,7 +233,7 @@ module Unified_TX_Ops = struct
         in
         copy_to_pages [data] true [] nfrags
 
-    | None, Some rx_grants -> (* Backend *)
+    | Back { rx_grants ; _ } -> (* Backend *)
         let pages_needed = max 1 @@ Io_page.round_to_page_size size / Io_page.page_size in
         backend_get_n_grefs t rx_grants pages_needed >>= fun reqs ->
 
@@ -258,17 +264,13 @@ module Unified_TX_Ops = struct
               map_and_copy src' ((frag, Lwt.return_unit) :: acc_frags) rest
         in
         map_and_copy [data] [] reqs
-    | None, None ->
-      Log.warn (fun m -> m "Neither tx_pool nor rx_grants in vid %d/domid %d"
-                   t.vif_id t.peer_domid);
-      Lwt.return []
 
   (* Fast path for a frame that fits in a single pool block: let the caller fill
      the shared block rather than fill a private buffer and copy it in. At an
      MTU of 1500 every frame takes this path. *)
   let write_single_block t ~size fillf =
-    match t.tx_pool with
-    | Some tx_pool ->
+    match t.ending with
+    | Front { tx_pool ; _ } ->
         Ring_ops.wait_for_free t.tx_ring 1 >>= fun () ->
         Shared_page_pool.use tx_pool (fun ~id gref shared_block ->
           (* Blocks are recycled and the whole page is granted to the peer, so
@@ -293,16 +295,16 @@ module Unified_TX_Ops = struct
           | _ -> Lwt.return ((len, frag), Lwt.return_unit)
         ) >|= fun ((len, frag), release) ->
         (len, [ (frag, release) ])
-    | None -> assert false (* guarded by the caller *)
+    | Back _ -> assert false (* guarded by the caller *)
 
   let notify_if_needed t =
-    match t.tx_pool with
-    | Some _ -> (* Frontend *)
+    match t.ending with
+    | Front _ -> (* Frontend *)
       (match t.tx_ring with
        | Front_ring (_, client) ->
            Lwt_ring.Front.push client (fun () -> Xen_os.Eventchn.notify h t.evtchn)
        | _ -> ())
-    | None -> (* Backend *)
+    | Back _ -> (* Backend *)
       if Ring_ops.push_and_check_notify t.rx_ring then
         Xen_os.Eventchn.notify h t.evtchn
 
@@ -311,10 +313,10 @@ end
 module Unified_RX_Ops = struct
   let read_packets nf =
     check_open nf.t;
-    match nf.t.tx_pool with
-    | Some _ -> (* Frontend reads responses on RX *)
+    match nf.t.ending with
+    | Front _ -> (* Frontend reads responses on RX *)
       Assemble.RX_IO.read_packets ~ack_fn:(Ring_ops.ack nf.t.rx_ring)
-    | None -> (* Backend reads requests on TX *)
+    | Back _ -> (* Backend reads requests on TX *)
       Assemble.TX_IO.read_packets ~ack_fn:(Ring_ops.ack nf.t.tx_ring)
 
   external unsafe_fill_bigstring : Io_page.t -> int -> int -> int -> unit
@@ -329,8 +331,8 @@ module Unified_RX_Ops = struct
      error response leaks its page on the frontend, and leaves the peer waiting
      for an acknowledgement on the backend. *)
   let discard_fragments nf frags =
-    match nf.t.tx_pool, nf.t.rx_map with
-    | Some _, Some rx_map -> (* Frontend: the pages are ours, take them back *)
+    match nf.t.ending with
+    | Front { rx_map ; _ } -> (* Frontend: the pages are ours, take them back *)
       frags |> Lwt_list.iter_s (fun frag ->
         let id = frag.Assemble.id in
         match Hashtbl.find_opt rx_map id with
@@ -341,11 +343,7 @@ module Unified_RX_Ops = struct
           Hashtbl.remove rx_map id;
           Xen_os.Xen.Export.end_access ~release_ref:true gref >|= fun () ->
           return_page nf page)
-    | Some _, None ->
-      Log.warn (fun f -> f "[Frontend-RX] no rx_map for vif %d/domid %d"
-                   nf.t.vif_id nf.t.peer_domid);
-      Lwt.return_unit
-    | None, _ -> (* Backend: answer so the peer can reuse its blocks *)
+    | Back _ -> (* Backend: answer so the peer can reuse its blocks *)
       List.iter (fun frag ->
         match nf.t.tx_ring with
         | Back_ring bring ->
@@ -360,8 +358,8 @@ module Unified_RX_Ops = struct
      torn down straight after. That is what keeps the fragment from having to be
      copied to a buffer of its own first. *)
   let with_page nf frag read =
-    match nf.t.tx_pool, nf.t.rx_map with
-    | Some _, Some rx_map -> (* Frontend: the page is ours, found from the id *)
+    match nf.t.ending with
+    | Front { rx_map ; _ } -> (* Frontend: the page is ours, found from the id *)
       let id = frag.Assemble.id in
       (match Hashtbl.find_opt rx_map id with
        | None ->
@@ -372,10 +370,7 @@ module Unified_RX_Ops = struct
          Hashtbl.remove rx_map id;
          Xen_os.Xen.Export.end_access ~release_ref:true gref >|= fun () ->
          return_page nf page)
-    | Some _, None ->
-      Lwt.fail_with (Printf.sprintf "Netif: no rx_map registered for vif_id %d/domid %d"
-                       nf.t.vif_id nf.t.peer_domid)
-    | None, _ -> (* Backend: the page is the peer's, reached through its grant *)
+    | Back _ -> (* Backend: the page is the peer's, reached through its grant *)
       let gnt = {Xen_os.Xen.Import.domid = nf.t.peer_domid;
                  ref = Xen_os.Xen.Gntref.of_int32 frag.Assemble.gref} in
       Xen_os.Xen.Import.with_mapping gnt ~writable:false (fun mapping ->
@@ -396,19 +391,19 @@ module Unified_RX_Ops = struct
        | Ok () -> Lwt.return_unit)
 
   let notify_if_needed nf =
-    match nf.t.tx_pool with
-    | Some _ -> (* Frontend pushes its refilled RX requests *)
+    match nf.t.ending with
+    | Front _ -> (* Frontend pushes its refilled RX requests *)
       if Ring_ops.push_and_check_notify nf.t.rx_ring then
         Xen_os.Eventchn.notify h nf.t.evtchn
-    | None -> (* Backend pushes the TX responses it just wrote *)
+    | Back _ -> (* Backend pushes the TX responses it just wrote *)
       if Ring_ops.push_and_check_notify nf.t.tx_ring then
         Xen_os.Eventchn.notify h nf.t.evtchn
 
   (* Frontend: hand the peer more pages to fill. Backend: bank the requests the
      peer has posted, so a later write has grants to copy into. *)
   let post_receive nf =
-    match nf.t.tx_pool, nf.t.rx_map, nf.t.rx_grants with
-    | Some _, Some rx_map, _ ->
+    match nf.t.ending with
+    | Front { rx_map ; _ } ->
       let free_slots = Ring_ops.get_free_slots nf.t.rx_ring in
       (* Bounded by both: a slot with no page behind it is a promise we cannot
          keep, and a page with no slot has nowhere to go. *)
@@ -430,9 +425,7 @@ module Unified_RX_Ops = struct
           RX.Request.(write {RX.Request.id; gref = Xen_os.Xen.Gntref.to_int32 gnt}) slot
         ) grants;
         Lwt.return_unit
-    | Some _, None, _
-    | None, Some _, None -> Lwt.return_unit
-    | None, _, Some rx_grants ->
+    | Back { rx_grants ; _ } ->
       (* backend_get_n_grefs drains the same way before it waits, so this only
          moves the work to the wake-up. The list is bounded by the ring. *)
       Ring_ops.ack nf.t.rx_ring (fun slot ->
@@ -465,14 +458,16 @@ module Make(C: S.CONFIGURATION) = struct
     Xen_os.Eventchn.unmask h evtchn;
     let grant_tx_page = Xen_os.Xen.Export.grant_access ~domid:backend_id ~writable:false in
     let tx_pool = Shared_page_pool.make grant_tx_page in
+    let ending = Front { tx_pool ; rx_map = Hashtbl.create 256 } in
     Lwt.return {
       vif_id; peer_domid = backend_id;
-      mac; peer_mac = None; mtu;
-      tx_ring; tx_gnt; tx_mutex = Lwt_mutex.create (); tx_pool = Some tx_pool;
+      mac; mtu;
+      tx_ring; tx_gnt; tx_mutex = Lwt_mutex.create ();
       rx_ring; rx_gnt;
-      rx_grants = None; rx_map = Some (Hashtbl.create 256); rx_id = 0;
+      rx_id = 0;
       free_pages = Io_page.to_pages (Io_page.get 256);
       evtchn; stats = Mirage_net.Stats.create (); closed = false;
+      ending;
     }
 
   let create_backend ~cleanup ~domid ~device_id ~frontend_mac ~mac ~mtu
@@ -491,15 +486,17 @@ module Make(C: S.CONFIGURATION) = struct
     Cleanup.push cleanup (fun () -> Xen_os.Eventchn.unbind h channel; Lwt.return_unit);
     Log.info (fun f -> f "[Backend] Bound to event channel: %s" event_channel);
     Xen_os.Eventchn.unmask h channel;
+    let ending = Back { peer_mac = frontend_mac ; rx_grants = Lwt_dllist.create () } in
     Lwt.return {
       vif_id = device_id; peer_domid = domid;
-      mac; peer_mac = Some frontend_mac; mtu;
+      mac; mtu;
       tx_ring; tx_gnt = Xen_os.Xen.Gntref.of_int32 tx_ring_ref;
-      tx_mutex = Lwt_mutex.create (); tx_pool = None;
+      tx_mutex = Lwt_mutex.create ();
       rx_ring; rx_gnt = Xen_os.Xen.Gntref.of_int32 rx_ring_ref;
-      rx_grants = Some (Lwt_dllist.create ()); rx_map = None; rx_id = 0;
+      rx_id = 0;
       free_pages = [];
       evtchn = channel; stats = Mirage_net.Stats.create (); closed = false;
+      ending;
     }
 
   let plug_frontend vif_id =
@@ -611,25 +608,24 @@ module Make(C: S.CONFIGURATION) = struct
   let write_locked nf ~size fillf =
     Lwt_mutex.with_lock nf.t.tx_mutex (fun () ->
       check_open nf.t;
-      let is_frontend = nf.t.tx_pool <> None in
-      (if is_frontend && Shared_page_pool.blocks_needed size = 1 then
+      (match nf.t.ending with
+       | Front _ when Shared_page_pool.blocks_needed size = 1 ->
          Unified_TX_Ops.write_single_block nf.t ~size fillf
-       else begin
+       | _ ->
          (* Several blocks, or the backend, which writes into the peer's pages:
             marshal into a private buffer first, then split it. *)
          let data = Cstruct.create size in
          let len = fillf data in
          if len > size then failwith "length exceeds total size";
          Unified_TX_Ops.fragment_data nf.t (Cstruct.sub data 0 len)
-         >|= fun fragments -> (len, fragments)
-       end) >|= fun (total_size, fragments) ->
+         >|= fun fragments -> (len, fragments)) >|= fun (total_size, fragments) ->
       Unified_TX_Ops.notify_if_needed nf.t;
       Stats.tx nf.t.stats (Int64.of_int total_size);
       Lwt.join (List.map snd fragments))
 
   let rec write nf ~size fillf =
-    match nf.t.tx_pool with
-    | None ->
+    match nf.t.ending with
+    | Back _ ->
       (* The backend has already answered its peer by the time write_locked
          returns, so there is nothing to wait for. *)
       Lwt.catch
@@ -637,7 +633,7 @@ module Make(C: S.CONFIGURATION) = struct
         (function
           | Netback_shutdown -> Lwt.return (Error `Disconnected)
           | ex -> Lwt.fail ex)
-    | Some _ ->
+    | Front _ ->
       Lwt.catch
         (fun () -> write_locked nf ~size fillf)
         (function
@@ -661,7 +657,7 @@ module Make(C: S.CONFIGURATION) = struct
     ) >|= fun () ->
     data
 
-  let direction nf = match nf.t.tx_pool with Some _ -> "Frontend" | None -> "Backend"
+  let direction nf = match nf.t.ending with Front _ -> "Frontend" | Back _ -> "Backend"
 
   let rx_poll nf callback =
     (* Reading must not take the listen loop down: everything here is driven by
@@ -708,9 +704,9 @@ module Make(C: S.CONFIGURATION) = struct
         | ex -> Lwt.fail ex)
 
   let frontend_mac nf =
-    match nf.t.peer_mac with
-    | Some mac -> mac (* Only the backend knows its peer's address *)
-    | None -> nf.t.mac
+    match nf.t.ending with
+    | Back { peer_mac ; _ } -> peer_mac
+    | Front _ -> nf.t.mac
 
   let mac nf = nf.t.mac
   let mtu nf = nf.t.mtu
@@ -721,14 +717,14 @@ module Make(C: S.CONFIGURATION) = struct
   (* Unplug shouldn't block, although the Xen one might need to due
      to Xenstore? XXX *)
   let disconnect nf =
-    match nf.t.tx_pool with
-    | Some tx_pool ->
+    match nf.t.ending with
+    | Front { tx_pool ; _ } ->
       Log.info (fun f -> f "disconnect");
-      (* TODO: free pages still in [nf.t.rx_map] *)
+      (* TODO: free pages still in [rx_map] *)
       Shared_page_pool.shutdown tx_pool;
       Hashtbl.remove devices nf.t.vif_id;
       Lwt.return_unit
-    | None ->
+    | Back _ ->
       (* The switch created by [make_backend] performs the teardown. *)
       nf.t.closed <- true;
       Lwt.return_unit
