@@ -109,14 +109,14 @@ let frontend_allocate_ring ~domid =
   Xen_os.Xen.Export.get () >>= fun gnt ->
   Cstruct.memset x 0;
   Xen_os.Xen.Export.grant_access ~domid ~writable:true gnt page;
-  Lwt.return (gnt, x, page)
+  Lwt.return (gnt, x)
 
 let frontend_create_ring ~domid ~idx_size name =
-  frontend_allocate_ring ~domid >>= fun (gnt, buf, page) ->
+  frontend_allocate_ring ~domid >>= fun (gnt, buf) ->
   let sring = Ring.Rpc.of_buf ~buf ~idx_size ~name in
   let fring = Ring.Rpc.Front.init ~sring in
   let client = Lwt_ring.Front.init string_of_int fring in
-  Lwt.return (gnt, Front_ring (fring, client), page)
+  Lwt.return (gnt, Front_ring (fring, client))
 
 let backend_import_ring ~domid ~gntref ~idx_size name writable =
   let grant = {Xen_os.Xen.Import.domid; ref = gntref} in
@@ -154,8 +154,7 @@ end
 
 (* Collect [n] receive requests the peer has posted, waiting on the event
    channel for more if it has not posted enough yet. *)
-let backend_get_n_grefs t n =
-  let rx_grants = Option.get t.rx_grants in
+let backend_get_n_grefs t rx_grants n =
   let rec take seq = function
     | 0 -> []
     | n -> Lwt_dllist.take_l seq :: (take seq (n - 1)) in
@@ -193,8 +192,8 @@ module Unified_TX_Ops = struct
      once the peer has answered for it. *)
   let fragment_data t data =
     let size = Cstruct.length data in
-    match t.tx_pool with
-    | Some tx_pool -> (* Frontend *)
+    match t.tx_pool, t.rx_grants with
+    | Some tx_pool, _ -> (* Frontend *)
         let nfrags = Shared_page_pool.blocks_needed size in
         Ring_ops.wait_for_free t.tx_ring nfrags >>= fun () ->
 
@@ -228,9 +227,9 @@ module Unified_TX_Ops = struct
         in
         copy_to_pages [data] true [] nfrags
 
-    | None -> (* Backend *)
+    | None, Some rx_grants -> (* Backend *)
         let pages_needed = max 1 @@ Io_page.round_to_page_size size / Io_page.page_size in
-        backend_get_n_grefs t pages_needed >>= fun reqs ->
+        backend_get_n_grefs t rx_grants pages_needed >>= fun reqs ->
 
         let rec map_and_copy src acc_frags = function
           | [] -> Lwt.return (List.rev acc_frags)
@@ -259,6 +258,10 @@ module Unified_TX_Ops = struct
               map_and_copy src' ((frag, Lwt.return_unit) :: acc_frags) rest
         in
         map_and_copy [data] [] reqs
+    | None, None ->
+      Log.warn (fun m -> m "Neither tx_pool nor rx_grants in vid %d/domid %d"
+                   t.vif_id t.peer_domid);
+      Lwt.return []
 
   (* Fast path for a frame that fits in a single pool block: let the caller fill
      the shared block rather than fill a private buffer and copy it in. At an
@@ -326,9 +329,8 @@ module Unified_RX_Ops = struct
      error response leaks its page on the frontend, and leaves the peer waiting
      for an acknowledgement on the backend. *)
   let discard_fragments nf frags =
-    match nf.t.tx_pool with
-    | Some _ -> (* Frontend: the pages are ours, take them back *)
-      let rx_map = Option.get nf.t.rx_map in
+    match nf.t.tx_pool, nf.t.rx_map with
+    | Some _, Some rx_map -> (* Frontend: the pages are ours, take them back *)
       frags |> Lwt_list.iter_s (fun frag ->
         let id = frag.Assemble.id in
         match Hashtbl.find_opt rx_map id with
@@ -339,7 +341,11 @@ module Unified_RX_Ops = struct
           Hashtbl.remove rx_map id;
           Xen_os.Xen.Export.end_access ~release_ref:true gref >|= fun () ->
           return_page nf page)
-    | None -> (* Backend: answer so the peer can reuse its blocks *)
+    | Some _, None ->
+      Log.warn (fun f -> f "[Frontend-RX] no rx_map for vif %d/domid %d"
+                   nf.t.vif_id nf.t.peer_domid);
+      Lwt.return_unit
+    | None, _ -> (* Backend: answer so the peer can reuse its blocks *)
       List.iter (fun frag ->
         match nf.t.tx_ring with
         | Back_ring bring ->
@@ -354,9 +360,8 @@ module Unified_RX_Ops = struct
      torn down straight after. That is what keeps the fragment from having to be
      copied to a buffer of its own first. *)
   let with_page nf frag read =
-    match nf.t.tx_pool with
-    | Some _ -> (* Frontend: the page is ours, found from the id *)
-      let rx_map = Option.get nf.t.rx_map in
+    match nf.t.tx_pool, nf.t.rx_map with
+    | Some _, Some rx_map -> (* Frontend: the page is ours, found from the id *)
       let id = frag.Assemble.id in
       (match Hashtbl.find_opt rx_map id with
        | None ->
@@ -367,8 +372,10 @@ module Unified_RX_Ops = struct
          Hashtbl.remove rx_map id;
          Xen_os.Xen.Export.end_access ~release_ref:true gref >|= fun () ->
          return_page nf page)
-
-    | None -> (* Backend: the page is the peer's, reached through its grant *)
+    | Some _, None ->
+      Lwt.fail_with (Printf.sprintf "Netif: no rx_map registered for vif_id %d/domid %d"
+                       nf.t.vif_id nf.t.peer_domid)
+    | None, _ -> (* Backend: the page is the peer's, reached through its grant *)
       let gnt = {Xen_os.Xen.Import.domid = nf.t.peer_domid;
                  ref = Xen_os.Xen.Gntref.of_int32 frag.Assemble.gref} in
       Xen_os.Xen.Import.with_mapping gnt ~writable:false (fun mapping ->
@@ -400,9 +407,8 @@ module Unified_RX_Ops = struct
   (* Frontend: hand the peer more pages to fill. Backend: bank the requests the
      peer has posted, so a later write has grants to copy into. *)
   let post_receive nf =
-    match nf.t.tx_pool with
-    | Some _ ->
-      let rx_map = Option.get nf.t.rx_map in
+    match nf.t.tx_pool, nf.t.rx_map, nf.t.rx_grants with
+    | Some _, Some rx_map, _ ->
       let free_slots = Ring_ops.get_free_slots nf.t.rx_ring in
       (* Bounded by both: a slot with no page behind it is a promise we cannot
          keep, and a page with no slot has nowhere to go. *)
@@ -424,11 +430,11 @@ module Unified_RX_Ops = struct
           RX.Request.(write {RX.Request.id; gref = Xen_os.Xen.Gntref.to_int32 gnt}) slot
         ) grants;
         Lwt.return_unit
-
-    | None ->
+    | Some _, None, _
+    | None, Some _, None -> Lwt.return_unit
+    | None, _, Some rx_grants ->
       (* backend_get_n_grefs drains the same way before it waits, so this only
          moves the work to the wake-up. The list is bounded by the ring. *)
-      let rx_grants = Option.get nf.t.rx_grants in
       Ring_ops.ack nf.t.rx_ring (fun slot ->
         let req = RX.Request.read slot in
         ignore(Lwt_dllist.add_r req rx_grants)
@@ -449,10 +455,10 @@ module Make(C: S.CONFIGURATION) = struct
     Log.info (fun f -> f "[Frontend] Creating: id=%d domid=%d" vif_id backend_id);
     frontend_create_ring ~domid:backend_id ~idx_size:TX.total_size
       (Printf.sprintf "Netif.TX.%d" vif_id)
-    >>= fun (tx_gnt, tx_ring, _tx_page) ->
+    >>= fun (tx_gnt, tx_ring) ->
     frontend_create_ring ~domid:backend_id ~idx_size:RX.total_size
       (Printf.sprintf "Netif.RX.%d" vif_id)
-    >>= fun (rx_gnt, rx_ring, _rx_page) ->
+    >>= fun (rx_gnt, rx_ring) ->
     let evtchn = Xen_os.Eventchn.bind_unbound_port h backend_id in
     Log.info (fun f -> f "[Frontend] Event channel: %d"
       (Xen_os.Eventchn.to_int evtchn));
