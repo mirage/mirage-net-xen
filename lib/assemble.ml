@@ -145,18 +145,18 @@ module Make_Reader(C : CHANNEL) = struct
         end else Ok ([msg], rest)
 
   and make_packet first_msg continuation_msgs =
-    let msgs = first_msg :: continuation_msgs in
-    let sizes = List.map C.size msgs in
+    let declared_size = C.size first_msg in
+    let rest_sizes = List.map C.size continuation_msgs in
     (* A non-positive status is a normal outcome, not a reason to abort the poll. *)
-    match List.partition_map (function Ok x -> Left x | Error e -> Right e) sizes with
-    | _, (_ :: _ as es) ->
+    match declared_size, List.partition_map (function Ok x -> Left x | Error e -> Right e) rest_sizes with
+    | Ok _, (_, (_ :: _ as es))
+    | Error _, (_, es) ->
       Log.warn (fun f -> f "[%s] Dropping packet: %d/%d messages carry an error status"
         C.name
-        (List.length es)
-        (List.length sizes));
-      Error (List.map fragment_of_msg msgs)
-    | [], _ -> assert false (* above we constructed 'let msgs = first_msg :: ..' *)
-    | declared_size::rest_sizes, [] ->
+        (List.length es + if Result.is_error declared_size then 1 else 0)
+        (List.length rest_sizes + 1));
+      Error (List.map fragment_of_msg (first_msg :: continuation_msgs))
+    | Ok declared_size, (rest_sizes, []) ->
       let total_size, first_fragment_size =
         C.compute_sizes_read ~declared_size ~rest_sizes in
       (* The TX subtraction goes negative if the peer announces sizes that do
@@ -164,7 +164,7 @@ module Make_Reader(C : CHANNEL) = struct
       if total_size < 0 || first_fragment_size < 0 then begin
         Log.warn (fun f -> f "[%s] Dropping packet with inconsistent sizes (total=%d first=%d)"
           C.name total_size first_fragment_size);
-        Error (List.map fragment_of_msg msgs)
+        Error (List.map fragment_of_msg (first_msg :: continuation_msgs))
       end else
         let first_fragment = {
           id = C.id first_msg;
