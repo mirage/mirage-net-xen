@@ -36,28 +36,37 @@ type assembled = (packet, fragment list) result
 
 (* The rings differ in the first message only. A transmit request announces the
    whole packet, since the sender knows it; a receive response cannot, being
-   written as its page is filled, so it carries its own size like the rest. *)
+   written as its page is filled, so it carries its own size like the rest.
+   https://github.com/xen-project/xen/blob/RELEASE-4.19.4/xen/include/public/io/netif.h#L757-L781 *)
 module type SIZE_STRATEGY = sig
   val name : string
 
   val compute_sizes_read :
-    first_size:int -> rest_sizes:int list -> (int * int)
+    declared_size:int -> rest_sizes:int list -> (int * int)
 end
 
 module RX_Size_Strategy : SIZE_STRATEGY = struct
   let name = "RX"
 
-  let compute_sizes_read ~first_size ~rest_sizes =
-    let total = first_size + List.fold_left (+) 0 rest_sizes in
-    (total, first_size)
+(* Every response reports the bytes written in its own page, the first one
+   included, so the packet is their sum.
+   https://github.com/xen-project/xen/blob/RELEASE-4.19.4/xen/include/public/io/netif.h#L834-L839 *)
+  let compute_sizes_read ~declared_size ~rest_sizes =
+    let total = declared_size + List.fold_left (+) 0 rest_sizes in
+    (total, declared_size)
 end
 
 module TX_Size_Strategy : SIZE_STRATEGY = struct
   let name = "TX"
 
-  let compute_sizes_read ~first_size ~rest_sizes =
-    let total = first_size in
-    let first_frag = first_size - List.fold_left (+) 0 rest_sizes in
+(* Here declared_size is the whole packet and the following requests carry only
+   their own fragment, so the first fragment is what remains. Same subtraction
+   as netback, first->size -= txp->size.
+   https://github.com/xen-project/xen/blob/RELEASE-4.19.4/xen/include/public/io/netif.h#L776-L781
+   https://github.com/torvalds/linux/blob/v6.12/drivers/net/xen-netback/netback.c#L304 *)
+  let compute_sizes_read ~declared_size ~rest_sizes =
+    let total = declared_size in
+    let first_frag = declared_size - List.fold_left (+) 0 rest_sizes in
     (total, first_frag)
 end
 
@@ -151,10 +160,9 @@ module Make_Reader(Msg : MESSAGE)(Size : SIZE_STRATEGY) = struct
       Error (List.map fragment_of_msg msgs)
     end else
       let sizes = List.map (function Ok s -> s | Error _ -> assert false) sizes in
-      let first_size = List.hd sizes in
-      let rest_sizes = List.tl sizes in
+      let declared_size::rest_sizes = sizes in
       let total_size, first_fragment_size =
-        Size.compute_sizes_read ~first_size ~rest_sizes in
+        Size.compute_sizes_read ~declared_size ~rest_sizes in
       (* The TX subtraction goes negative if the peer announces sizes that do
          not add up. *)
       if total_size < 0 || first_fragment_size < 0 then begin
