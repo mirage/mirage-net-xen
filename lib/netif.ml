@@ -62,17 +62,13 @@ type transport = {
   mutable closed: bool;
 }
 
-(* Only the frontend has anything to do here: it owns the pages behind the
-   receive ring and grants fresh ones as the ring is refilled. *)
-type grant_ops = {
-  get_rx_grants: transport -> int -> (Xen_os.Xen.Gntref.t * Io_page.t) list Lwt.t;
-}
-
 type t = {
   mutable t: transport;
   l: Lwt_mutex.t;
   c: unit Lwt_condition.t;
-  grant_ops: grant_ops;
+  (* Only the frontend has anything to do here: it owns the pages behind the
+     receive ring and grants fresh ones as the ring is refilled. *)
+  get_rx_grants: transport -> int -> (Xen_os.Xen.Gntref.t * Io_page.t) list Lwt.t;
 }
 
 let check_open t = if t.closed then raise Netback_shutdown
@@ -307,7 +303,6 @@ module Unified_TX_Ops = struct
       if Ring_ops.push_and_check_notify t.rx_ring then
         Xen_os.Eventchn.notify h t.evtchn
 
-  let get_stats t = t.stats
 end
 
 module Unified_RX_Ops = struct
@@ -393,9 +388,6 @@ module Unified_RX_Ops = struct
        | Error (`Msg m) -> Lwt.fail_with m
        | Ok () -> Lwt.return_unit)
 
-  let get_evtchn nf = nf.t.evtchn
-  let get_stats nf = nf.t.stats
-
   let notify_if_needed nf =
     match nf.t.tx_pool with
     | Some _ -> (* Frontend pushes its refilled RX requests *)
@@ -417,7 +409,7 @@ module Unified_RX_Ops = struct
       let to_refill = min free_slots (List.length nf.t.free_pages) in
       if to_refill <= 0 then Lwt.return_unit
       else
-        nf.grant_ops.get_rx_grants nf.t to_refill >>= fun grants ->
+        nf.get_rx_grants nf.t to_refill >>= fun grants ->
         List.iter (fun (gnt, page) ->
           (* The id is ours to choose and is only sixteen bits wide, so skip any
              the peer has not answered for yet. *)
@@ -541,7 +533,7 @@ module Make(C: S.CONFIGURATION) = struct
       t = transport;
       l = Lwt_mutex.create ();
       c = Lwt_condition.create ();
-      grant_ops = { get_rx_grants }
+      get_rx_grants;
     }
 
   let connect id =
@@ -589,7 +581,7 @@ module Make(C: S.CONFIGURATION) = struct
       t = transport;
       l = Lwt_mutex.create ();
       c = Lwt_condition.create ();
-      grant_ops = { get_rx_grants = (fun _t _n -> Lwt.return []) }
+      get_rx_grants = (fun _t _n -> Lwt.return []);
     } in
     (* Last pushed, first performed: stop anyone touching the rings before they
        are unmapped. *)
@@ -626,7 +618,7 @@ module Make(C: S.CONFIGURATION) = struct
          >|= fun fragments -> (len, fragments)
        end) >|= fun (total_size, fragments) ->
       Unified_TX_Ops.notify_if_needed nf.t;
-      Stats.tx (Unified_TX_Ops.get_stats nf.t) (Int64.of_int total_size);
+      Stats.tx nf.t.stats (Int64.of_int total_size);
       Lwt.join (List.map snd fragments))
 
   let rec write nf ~size fillf =
@@ -683,7 +675,7 @@ module Make(C: S.CONFIGURATION) = struct
       | Ok packet ->
         Lwt.catch (fun () ->
           assemble_packet packet (Unified_RX_Ops.with_page nf) >|= fun data ->
-          Stats.rx (Unified_RX_Ops.get_stats nf) (Int64.of_int packet.Assemble.total_size);
+          Stats.rx nf.t.stats (Int64.of_int packet.Assemble.total_size);
           Lwt.async (fun () -> callback data)
         ) (fun ex ->
           Log.err (fun f -> f "[%s-RX] Callback FAILED with exception: %s"
@@ -692,7 +684,6 @@ module Make(C: S.CONFIGURATION) = struct
 
   let listen nf ~header_size:_ callback =
     let rec loop after =
-      let evtchn = Unified_RX_Ops.get_evtchn nf in
       rx_poll nf callback >>= fun () ->
       Unified_RX_Ops.post_receive nf >>= fun () ->
       Unified_RX_Ops.notify_if_needed nf;
@@ -702,7 +693,7 @@ module Make(C: S.CONFIGURATION) = struct
              let resp = TX.Response.read slot in
              (resp.TX.Response.id, resp))
        | _ -> ());
-      Xen_os.Activations.after evtchn after >>= loop
+      Xen_os.Activations.after nf.t.evtchn after >>= loop
     in
     Lwt.catch
       (fun () -> loop Xen_os.Activations.program_start)
