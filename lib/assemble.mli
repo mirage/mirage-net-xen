@@ -39,9 +39,6 @@ type packet = {
           for a backend reading ids its peer chose. *)
 }
 
-val extras_seen : int ref
-(** Extra_info descriptors parsed off a ring since boot, across every reader. *)
-
 type assembled = (packet, fragment list) result
 (** [Error frags] reports the fragments of a packet that could not be assembled,
     so the caller can release their pages and grants rather than leak them.

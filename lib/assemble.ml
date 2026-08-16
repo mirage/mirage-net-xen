@@ -18,11 +18,6 @@
 let src = Logs.Src.create "assemble" ~doc:"mirage-net-xen.assemble"
 module Log = (val Logs.src_log src : Logs.LOG)
 
-(* Extra_info descriptors parsed off a ring since boot, across every reader.
-   Tells a caller whether the peer really sends aggregated frames, which the
-   fragment count alone cannot say. *)
-let extras_seen = ref 0
-
 type fragment = {
   id: int;
   offset: int;
@@ -148,7 +143,6 @@ module Make_Reader(C : CHANNEL) = struct
                 pending_msg := None;
                 pending_extras := []
             | Ok extra ->
-                incr extras_seen;
                 pending_extras := extra :: !pending_extras;
                 (* Bit 0 of flags: 0 = last extra, 1 = more extras *)
                 if extra.Extra.flags land 1 = 0 then (

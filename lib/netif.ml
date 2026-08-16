@@ -59,53 +59,6 @@ type ending =
       rx_scratch: Io_page.t ;
     }
 
-(* Cheap counters for working out where the per-packet cost goes. Only integer
-   increments happen on the packet path; the summary is emitted on a timer, so
-   this must not become another hot-path logger. *)
-type counters = {
-  mutable polls: int;          (* listen iterations *)
-  mutable rx_frames: int;
-  mutable rx_fragments: int;
-  mutable rx_dropped: int;
-  mutable tx_frames: int;
-  mutable tx_fragments: int;
-  mutable reported_at: int;    (* rx_frames + tx_frames at the last summary *)
-  (* Time spent inside grant hypercalls, which only the backend performs.
-     grant_access on the frontend is a plain grant table write and costs
-     nothing comparable, so it is not counted. *)
-  mutable grant_ns: int64;
-  mutable grant_ops: int;
-  mutable last_ns: int64;      (* clock at the last summary, for exact rates *)
-  (* Frames handed over with a GSO descriptor attached. Without this there is no
-     telling an aggregating link from one that never had a frame worth it. *)
-  mutable tx_aggregated: int;
-  (* Of those, the ones spanning more than one page, which are the only ones
-     setting more_data alongside the descriptor. Kept apart because a fault that
-     touches only the multi-slot form is invisible in the total. *)
-  mutable tx_aggregated_multi: int;
-}
-
-(* On a timer rather than every N frames, so the counters keep coming when
-   throughput collapses, which is exactly when they are wanted. *)
-let report_interval_ns = 1_000_000_000L
-
-(* solo5_clock_monotonic, already linked in by mirage-xen's clock_stubs.c. Not
-   re-exported through Xen_os, hence the direct declaration. *)
-external monotonic_ns : unit -> int64 = "caml_get_monotonic_time"
-
-let new_counters () = {
-  polls = 0; rx_frames = 0; rx_fragments = 0; rx_dropped = 0;
-  tx_frames = 0; tx_fragments = 0; reported_at = 0;
-  grant_ns = 0L; grant_ops = 0; last_ns = monotonic_ns ();
-  tx_aggregated = 0; tx_aggregated_multi = 0;
-}
-
-(* Charge the time since [before] to the grant total. Call sites read the clock
-   themselves rather than passing a closure, so nothing is allocated here. *)
-let account_grant c ~before ~ops =
-  c.grant_ns <- Int64.add c.grant_ns (Int64.sub (monotonic_ns ()) before);
-  c.grant_ops <- c.grant_ops + ops
-
 type transport = {
   vif_id: int;
   peer_domid: int;
@@ -121,7 +74,6 @@ type transport = {
 
   evtchn: Xen_os.Eventchn.t;
   stats: Mirage_net.stats;
-  counters: counters;
   (* Set once the rings have been unmapped. The backend rings are the peer's
      pages and touching them after that is a use after free. *)
   mutable closed: bool;
@@ -313,12 +265,6 @@ module Unified_TX_Ops = struct
       else None
     in
     let use_gso = gso_mss <> None in
-    (match gso_mss with
-     | None -> ()
-     | Some _ ->
-         t.counters.tx_aggregated <- t.counters.tx_aggregated + 1;
-         if size > Io_page.page_size then
-           t.counters.tx_aggregated_multi <- t.counters.tx_aggregated_multi + 1);
     match t.ending with
     | Front { tx_pool ; tx_ring = (_, client) ; _ } -> (* Frontend *)
         let nfrags = Shared_page_pool.blocks_needed size in
@@ -387,7 +333,6 @@ module Unified_TX_Ops = struct
               (* One hypercall where map, copy and unmap took two plus the page
                  table work. Both endpoints stay inside one page: the source is
                  aligned and offset advances a page at a time. *)
-              let before = monotonic_ns () in
               let copied =
                 Xen_os.Xen.Import.copy_to
                   ~src:src_page ~src_off:(data.Cstruct.off + offset)
@@ -395,7 +340,6 @@ module Unified_TX_Ops = struct
                   ~gref:(Xen_os.Xen.Gntref.of_int32 req.RX.Request.gref)
                   ~dst_off:0 ~len:to_copy
               in
-              account_grant t.counters ~before ~ops:1;
               (* A refused copy leaves the peer's page holding whatever was
                  there, so announcing to_copy bytes would hand it a stale frame.
                  Report the failure instead. *)
@@ -565,7 +509,6 @@ module Unified_RX_Ops = struct
          return_page nf page)
 
     | Back { tx_ring ; rx_scratch ; _ } -> (* Backend: the page is the peer's, reached through its grant *)
-      let before = monotonic_ns () in
       (* Only frag.size bytes move, where the mapping cost a whole page plus the
          page table work. It lands at the offset it had in the peer's page, so
          the caller reads it exactly where it would have. *)
@@ -575,7 +518,6 @@ module Unified_RX_Ops = struct
           ~src_off:frag.Assemble.offset ~dst:rx_scratch
           ~dst_off:frag.Assemble.offset ~len:frag.Assemble.size
       in
-      account_grant nf.t.counters ~before ~ops:1;
       (match copied with
         | Ok () -> read (Io_page.to_cstruct rx_scratch)
         | Error _ -> ());
@@ -665,7 +607,7 @@ module Make(C: S.CONFIGURATION) = struct
       rx_gnt;
       rx_id = 0;
       free_pages = Io_page.to_pages (Io_page.get 256);
-      evtchn; stats = Mirage_net.Stats.create (); counters = new_counters (); closed = false;
+      evtchn; stats = Mirage_net.Stats.create (); closed = false;
       ending;
       peer_accepts_gso = peer_accepts_gso && Features.supported.gso_tcpv4;
       accepts_gso = Features.supported.gso_tcpv4;
@@ -697,7 +639,7 @@ module Make(C: S.CONFIGURATION) = struct
       rx_gnt = Xen_os.Xen.Gntref.of_int32 rx_ring_ref;
       rx_id = 0;
       free_pages = [];
-      evtchn = channel; stats = Mirage_net.Stats.create (); counters = new_counters (); closed = false;
+      evtchn = channel; stats = Mirage_net.Stats.create (); closed = false;
       ending;
       peer_accepts_gso = peer_accepts_gso && Features.supported.gso_tcpv4;
       accepts_gso;
@@ -851,8 +793,6 @@ module Make(C: S.CONFIGURATION) = struct
          if len > size then failwith "length exceeds total size";
          Unified_TX_Ops.fragment_data nf.t ?src_page (Cstruct.sub data 0 len)
          >|= fun fragments -> (len, fragments)) >|= fun (total_size, fragments) ->
-      nf.t.counters.tx_frames <- nf.t.counters.tx_frames + 1;
-      nf.t.counters.tx_fragments <- nf.t.counters.tx_fragments + List.length fragments;
       Unified_TX_Ops.notify_if_needed nf.t;
       Stats.tx nf.t.stats (Int64.of_int total_size);
       Lwt.join (List.map snd fragments))
@@ -907,15 +847,12 @@ module Make(C: S.CONFIGURATION) = struct
       | Error frags ->
         Log.warn (fun f -> f "[%s-RX] Dropping unassembled packet (%d fragments)"
           (direction nf) (List.length frags));
-        nf.t.counters.rx_dropped <- nf.t.counters.rx_dropped + 1;
         Unified_RX_Ops.discard_fragments nf frags
       | Ok packet ->
         Lwt.catch (fun () ->
           assemble_packet packet (Unified_RX_Ops.with_page nf) >>= fun data ->
           Unified_RX_Ops.release_extra_slots nf packet.Assemble.extra_ids
           >>= fun () ->
-          nf.t.counters.rx_frames <- nf.t.counters.rx_frames + 1;
-          nf.t.counters.rx_fragments <- nf.t.counters.rx_fragments + List.length packet.Assemble.fragments;
           Stats.rx nf.t.stats (Int64.of_int packet.Assemble.total_size);
           (* Lwt.async here would let the next frame start before this one has
              finished, and would put the callback outside the catch below. The
@@ -926,53 +863,11 @@ module Make(C: S.CONFIGURATION) = struct
             (direction nf) (Printexc.to_string ex));
           Lwt.return_unit))
 
-  (* frames/poll is the batching factor: close to 1 means a full event channel
-     wake-up per frame. fragments/frame is how many ring slots and page copies
-     each frame costs. grant_share is the fraction of wall time spent inside
-     grant hypercalls, which is the cost this driver can actually act on. *)
-  let report_counters nf =
-    let c = nf.t.counters in
-    let ratio a b = if b = 0 then 0.0 else float_of_int a /. float_of_int b in
-    let now = monotonic_ns () in
-    let elapsed_ns = Int64.sub now c.last_ns in
-    let elapsed_s = Int64.to_float elapsed_ns /. 1e9 in
-    let frames_this_round = c.rx_frames + c.tx_frames - c.reported_at in
-    let ops_per_s =
-      if elapsed_s > 0.0 then float_of_int frames_this_round /. elapsed_s else 0.0 in
-    let grant_us = Int64.to_float c.grant_ns /. 1e3 in
-    let grant_share =
-      if elapsed_ns > 0L then Int64.to_float c.grant_ns /. Int64.to_float elapsed_ns
-      else 0.0 in
-    Log.debug (fun f -> f
-      "[%s] counters: polls=%d rx_frames=%d frags/frame=%.2f frames/poll=%.2f \
-       rx_dropped=%d tx_frames=%d tx_frags/frame=%.2f free_pages=%d \
-       ops/s=%.0f grant_ops=%d grant_us/op=%.2f grant_share=%.1f%% \
-       tx_aggregated=%d tx_agg_multi=%d extras_seen=%d"
-      (direction nf) c.polls c.rx_frames
-      (ratio c.rx_fragments c.rx_frames)
-      (ratio c.rx_frames c.polls)
-      c.rx_dropped c.tx_frames
-      (ratio c.tx_fragments c.tx_frames)
-      (List.length nf.t.free_pages)
-      ops_per_s c.grant_ops
-      (if c.grant_ops = 0 then 0.0 else grant_us /. float_of_int c.grant_ops)
-      (grant_share *. 100.0)
-      c.tx_aggregated c.tx_aggregated_multi !Assemble.extras_seen);
-    (* grant_ns and grant_ops are per round, so the share is of this round. *)
-    c.reported_at <- c.rx_frames + c.tx_frames;
-    c.last_ns <- now;
-    c.grant_ns <- 0L;
-    c.grant_ops <- 0
-
   let listen nf ~header_size:_ callback =
     let rec loop after =
-      let c = nf.t.counters in
-      c.polls <- c.polls + 1;
       rx_poll nf callback >>= fun () ->
       Unified_RX_Ops.post_receive nf >>= fun () ->
       Unified_RX_Ops.notify_if_needed nf;
-      if Int64.sub (monotonic_ns ()) c.last_ns >= report_interval_ns then
-        report_counters nf;
       (match nf.t.ending with
        | Front { tx_ring = _fring, client ; _ } ->
            Lwt_ring.Front.poll client (fun slot ->
