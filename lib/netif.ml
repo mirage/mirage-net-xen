@@ -672,7 +672,7 @@ module Make(C: S.CONFIGURATION) = struct
     }
 
   let create_backend ~cleanup ~domid ~device_id ~frontend_mac ~mac ~mtu
-      ~tx_ring_ref ~rx_ring_ref ~event_channel ~peer_accepts_gso =
+      ~tx_ring_ref ~rx_ring_ref ~event_channel ~peer_accepts_gso ~accepts_gso =
     Log.info (fun f -> f "[Backend] Creating: domid=%d device_id=%d" domid device_id);
     backend_import_ring ~domid ~gntref:(Xen_os.Xen.Gntref.of_int32 tx_ring_ref)
       ~idx_size:TX.total_size "Netif.Backend.TX" true
@@ -700,7 +700,7 @@ module Make(C: S.CONFIGURATION) = struct
       evtchn = channel; stats = Mirage_net.Stats.create (); counters = new_counters (); closed = false;
       ending;
       peer_accepts_gso = peer_accepts_gso && Features.supported.gso_tcpv4;
-      accepts_gso = Features.supported.gso_tcpv4;
+      accepts_gso;
     }
 
   let plug_frontend vif_id =
@@ -774,7 +774,12 @@ module Make(C: S.CONFIGURATION) = struct
     Cleanup.push cleanup (fun () -> C.disconnect_backend id);
     C.read_backend_mac id >>= fun mac ->
     C.read_frontend_mac id >>= fun frontend_mac ->
-    C.init_backend id Features.supported >>= fun _backend_configuration ->
+    (* Do not invite the peer to send what we could not pass on. Only a backend
+       attaches a GSO descriptor, so a frame we accept here and have to forward
+       out of a frontend would need fragmenting, which don't-fragment forbids
+       and which loses the packet. Revisit once the frontend can aggregate. *)
+    let backend_features = { Features.supported with gso_tcpv4 = false } in
+    C.init_backend id backend_features >>= fun _backend_configuration ->
     C.read_frontend_configuration id >>= fun f ->
     C.read_mtu id >>= fun mtu ->
     create_backend ~cleanup ~domid ~device_id ~frontend_mac ~mac ~mtu
@@ -782,6 +787,7 @@ module Make(C: S.CONFIGURATION) = struct
       ~rx_ring_ref:f.S.rx_ring_ref
       ~event_channel:f.S.event_channel
       ~peer_accepts_gso:f.S.feature_requests.gso_tcpv4
+      ~accepts_gso:backend_features.Features.gso_tcpv4
     >>= fun transport ->
     C.connect id >>= fun () ->
     Log.info (fun f -> f "[Backend] Connected to frontend");
