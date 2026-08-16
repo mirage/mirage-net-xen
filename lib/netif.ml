@@ -369,7 +369,7 @@ module Unified_TX_Ops = struct
            Writing one more response than we consume requests is what puts the
            two streams permanently out of step. *)
         let slots_needed = if use_gso then pages_needed + 1 else pages_needed in
-        backend_get_n_grefs t rx_ring rx_grants pages_needed >>= fun reqs ->
+        backend_get_n_grefs t rx_ring rx_grants slots_needed >>= fun reqs ->
         (* The descriptor follows the first response, so the second consumed
            request is the one spent on it. *)
         let reqs =
