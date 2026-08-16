@@ -150,7 +150,7 @@ type t = {
    descriptor saying how. Everything that promises an oversized frame and
    everything that emits one asks this same question. *)
 let may_aggregate t =
-  (match t.tx_pool with Front _ -> false | Back _ -> true) && t.peer_accepts_gso
+  (match t.ending with Front _ -> false | Back _ -> true) && t.peer_accepts_gso
 
 let check_open t = if t.closed then raise Netback_shutdown
 
@@ -381,7 +381,7 @@ module Unified_TX_Ops = struct
         in
 
         let rec copy_to_peer offset acc_frags = function
-          | [] -> return (List.rev acc_frags)
+          | [] -> Lwt.return (List.rev acc_frags)
           | req :: rest ->
               let to_copy = min Io_page.page_size (size - offset) in
               (* One hypercall where map, copy and unmap took two plus the page
@@ -423,11 +423,13 @@ module Unified_TX_Ops = struct
               (* Each RX response carries the size of its own fragment. *)
               let resp = { RX.Response.id = req.RX.Request.id; offset = 0;
                            flags; size = resp_size; extras = [] } in
-              RX.Response.write resp slot
+              RX.Response.write resp slot;
               (match (if is_first then gso_mss else None) with
                | None -> ()
                | Some mss ->
-                   write_gso_extra t.rx_ring mss Extra.gso_type_tcpv4);
+                   write_gso_extra t.ending mss Extra.gso_type_tcpv4);
+              copy_to_peer (offset + to_copy)
+                ((frag, Lwt.return_unit) :: acc_frags) rest
         in
         copy_to_peer 0 [] reqs
 
@@ -535,11 +537,11 @@ module Unified_RX_Ops = struct
           Lwt.return_unit
         | Some (gref, page) ->
           Hashtbl.remove rx_map id;
-          Export.end_access ~release_ref:true gref >|= fun () ->
+          Xen_os.Xen.Export.end_access ~release_ref:true gref >|= fun () ->
           return_page nf page)
     | Back { tx_ring ; _ } -> (* Backend: only the slot, answered so the peer reclaims it *)
       List.iter (fun _id ->
-        let slot = Ring.Rpc.Back.(slot bring (next_res_id bring)) in
+        let slot = Ring.Rpc.Back.(slot tx_ring (next_res_id tx_ring)) in
         TX.Response.write
           { TX.Response.id = 0; status = TX.Response.NULL } slot) ids ;
       Lwt.return_unit
@@ -570,19 +572,19 @@ module Unified_RX_Ops = struct
       let copied =
         Xen_os.Xen.Import.copy_from ~domid:nf.t.peer_domid
           ~gref:(Xen_os.Xen.Gntref.of_int32 frag.Assemble.gref)
-          ~src_off:frag.Assemble.offset ~dst:scratch
+          ~src_off:frag.Assemble.offset ~dst:rx_scratch
           ~dst_off:frag.Assemble.offset ~len:frag.Assemble.size
       in
       account_grant nf.t.counters ~before ~ops:1;
       (match copied with
-        | Ok () -> read (Io_page.to_cstruct scratch)
+        | Ok () -> read (Io_page.to_cstruct rx_scratch)
         | Error _ -> ());
       (* Answer either way, so the peer can reuse the block whether or not we
          managed to read it. *)
       let slot = Ring.Rpc.Back.(slot tx_ring (next_res_id tx_ring)) in
       let status =
         match copied with Ok () -> TX.Response.OKAY | Error _ -> TX.Response.ERROR in
-      TX.Response.write {TX.Response.id = frag.Assemble.id; status} slot
+      TX.Response.write {TX.Response.id = frag.Assemble.id; status} slot;
       (match copied with
         | Error (`Msg m) -> Lwt.fail_with m
         | Ok () -> Lwt.return_unit)
@@ -829,9 +831,9 @@ module Make(C: S.CONFIGURATION) = struct
                (* Reused, so clear what fillf is about to write over. Only len
                   bytes ever reach the peer, so this is about the marshallers,
                   not about leaking. *)
-               let cs = Cstruct.sub (Io_page.to_cstruct page) 0 size in
+               let cs = Cstruct.sub (Io_page.to_cstruct tx_scratch) 0 size in
                Cstruct.memset cs 0;
-               (cs, Some page)
+               (cs, Some tx_scratch)
            | Back _ ->
                (* Larger than the scratch, which needs an MTU above 4 kB. A
                   fresh Io_page is aligned and comes zeroed. *)
@@ -903,7 +905,6 @@ module Make(C: S.CONFIGURATION) = struct
         Unified_RX_Ops.discard_fragments nf frags
       | Ok packet ->
         Lwt.catch (fun () ->
-          Lwt.async (fun () -> callback data)
           assemble_packet packet (Unified_RX_Ops.with_page nf) >>= fun data ->
           Unified_RX_Ops.release_extra_slots nf packet.Assemble.extra_ids
           >>= fun () ->
