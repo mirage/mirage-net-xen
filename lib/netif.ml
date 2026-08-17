@@ -80,12 +80,12 @@ type transport = {
   ending : ending;
 
   (* The two halves of feature-gso-tcpv4, which the protocol keeps separate.
-     [peer_accepts_gso] is what the other end advertised, so it gates what we
-     put on the ring. [accepts_gso] is what we advertised, so it gates what we
+     [peer_accepts_gso_v4] is what the other end advertised, so it gates what we
+     put on the ring. [accepts_gso_v4] is what we advertised, so it gates what we
      must be ready to read: once set, every descriptor stream has to be parsed
      for extra_info whether or not any arrives. *)
-  peer_accepts_gso: bool;
-  accepts_gso: bool;
+  peer_accepts_gso_v4: bool;
+  accepts_gso_v4: bool;
 }
 
 type t = {
@@ -102,7 +102,7 @@ type t = {
    descriptor saying how. Everything that promises an oversized frame and
    everything that emits one asks this same question. *)
 let may_aggregate t =
-  (match t.ending with Front _ -> false | Back _ -> true) && t.peer_accepts_gso
+  (match t.ending with Front _ -> false | Back _ -> true) && t.peer_accepts_gso_v4
 
 let check_open t = if t.closed then raise Netback_shutdown
 
@@ -422,10 +422,10 @@ module Unified_RX_Ops = struct
     match nf.t.ending with
     | Front { rx_ring = ring, _ ; _}  -> (* Frontend reads responses on RX *)
       let ack_fn = Ring.Rpc.Front.ack_responses ring in
-      Assemble.RX_IO.read_packets ~ack_fn ~with_extras:nf.t.accepts_gso
+      Assemble.RX_IO.read_packets ~ack_fn ~with_extras:nf.t.accepts_gso_v4
     | Back { tx_ring ; _ } -> (* Backend reads requests on TX *)
       let ack_fn = Ring.Rpc.Back.ack_requests tx_ring in
-      Assemble.TX_IO.read_packets ~ack_fn ~with_extras:nf.t.accepts_gso
+      Assemble.TX_IO.read_packets ~ack_fn ~with_extras:nf.t.accepts_gso_v4
 
   external unsafe_fill_bigstring : Io_page.t -> int -> int -> int -> unit
     = "caml_fill_bigstring" [@@noalloc]
@@ -585,7 +585,7 @@ module Make(C: S.CONFIGURATION) = struct
   (** Set of active block devices *)
   let devices : (int, t) Hashtbl.t = Hashtbl.create 1
 
-  let create_frontend ~vif_id ~backend_id ~mac ~mtu ~peer_accepts_gso =
+  let create_frontend ~vif_id ~backend_id ~mac ~mtu ~peer_accepts_gso_v4 =
     Log.info (fun f -> f "[Frontend] Creating: id=%d domid=%d" vif_id backend_id);
     frontend_create_ring ~domid:backend_id ~idx_size:TX.total_size
       (Printf.sprintf "Netif.TX.%d" vif_id)
@@ -609,12 +609,12 @@ module Make(C: S.CONFIGURATION) = struct
       free_pages = Io_page.to_pages (Io_page.get 256);
       evtchn; stats = Mirage_net.Stats.create (); closed = false;
       ending;
-      peer_accepts_gso = peer_accepts_gso && Features.supported.gso_tcpv4;
-      accepts_gso = Features.supported.gso_tcpv4;
+      peer_accepts_gso_v4 = peer_accepts_gso_v4 && Features.supported.gso_tcpv4;
+      accepts_gso_v4 = Features.supported.gso_tcpv4;
     }
 
   let create_backend ~cleanup ~domid ~device_id ~frontend_mac ~mac ~mtu
-      ~tx_ring_ref ~rx_ring_ref ~event_channel ~peer_accepts_gso ~accepts_gso =
+      ~tx_ring_ref ~rx_ring_ref ~event_channel ~peer_accepts_gso_v4 ~accepts_gso_v4 =
     Log.info (fun f -> f "[Backend] Creating: domid=%d device_id=%d" domid device_id);
     backend_import_ring ~domid ~gntref:(Xen_os.Xen.Gntref.of_int32 tx_ring_ref)
       ~idx_size:TX.total_size "Netif.Backend.TX" true
@@ -641,8 +641,8 @@ module Make(C: S.CONFIGURATION) = struct
       free_pages = [];
       evtchn = channel; stats = Mirage_net.Stats.create (); closed = false;
       ending;
-      peer_accepts_gso = peer_accepts_gso && Features.supported.gso_tcpv4;
-      accepts_gso;
+      peer_accepts_gso_v4 = peer_accepts_gso_v4 && Features.supported.gso_tcpv4;
+      accepts_gso_v4;
     }
 
   let plug_frontend vif_id =
@@ -652,7 +652,7 @@ module Make(C: S.CONFIGURATION) = struct
     C.read_frontend_mac id >>= fun mac ->
     C.read_mtu id >>= fun mtu ->
     create_frontend ~vif_id ~backend_id ~mac ~mtu
-      ~peer_accepts_gso:backend_conf.S.features_available.gso_tcpv4
+      ~peer_accepts_gso_v4:backend_conf.S.features_available.gso_tcpv4
     >>= fun transport ->
     let front_conf = { S.
       tx_ring_ref = Xen_os.Xen.Gntref.to_int32 transport.tx_gnt;
@@ -728,8 +728,8 @@ module Make(C: S.CONFIGURATION) = struct
       ~tx_ring_ref:f.S.tx_ring_ref
       ~rx_ring_ref:f.S.rx_ring_ref
       ~event_channel:f.S.event_channel
-      ~peer_accepts_gso:f.S.feature_requests.gso_tcpv4
-      ~accepts_gso:backend_features.Features.gso_tcpv4
+      ~peer_accepts_gso_v4:f.S.feature_requests.gso_tcpv4
+      ~accepts_gso_v4:backend_features.Features.gso_tcpv4
     >>= fun transport ->
     C.connect id >>= fun () ->
     Log.info (fun f -> f "[Backend] Connected to frontend");

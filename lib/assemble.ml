@@ -127,7 +127,7 @@ module Make_Reader(C : CHANNEL) = struct
 
   (* A descriptor sits in the slot after the message it qualifies and carries no
      data, so it has to be recognised rather than read as another message. *)
-  let collect_messages ?(with_extras=false) ack_fn =
+  let collect_messages ~with_extras ack_fn =
     let messages = ref [] in
     let pending_msg = ref None in
     let pending_extras = ref [] in
@@ -239,8 +239,8 @@ module Make_Reader(C : CHANNEL) = struct
         ) continuation_msgs rest_sizes in
         Ok { total_size; fragments = first_fragment :: rest_fragments; extra_ids }
 
-  let read_packets ?with_extras ack_fn =
-    let messages = collect_messages ?with_extras ack_fn in
+  let read_packets ~with_extras ack_fn =
+    let messages = collect_messages ~with_extras ack_fn in
     let packets = group_into_packets messages in
     Log.debug (fun f -> f "[%s.Reader] read_packets: %d messages -> %d packets (%d dropped)"
       C.name (List.length messages) (List.length packets)
