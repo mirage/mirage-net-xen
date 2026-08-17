@@ -24,6 +24,7 @@ module Request : sig
     flags: Flags.t;
     id: int;
     size: int;
+    extras : Extra.t list;
   }
 
   val write: t -> Cstruct.t -> unit

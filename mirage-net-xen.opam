@@ -18,7 +18,7 @@ depends: [
   "lwt" {>= "2.4.3"}
   "mirage-net" {>= "3.0.0"}
   "io-page" {>= "1.5.0"}
-  "mirage-xen" {>= "7.0.0"}
+  "mirage-xen" {>= "9.0.1"}
   "ipaddr" {>= "3.0.0"}
   "shared-memory-ring" {>="3.0.0"}
   "macaddr" {>= "5.2.0"}

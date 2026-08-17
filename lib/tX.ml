@@ -29,6 +29,7 @@ module Request = struct
        of that fragment. The receiver recovers the actual size of the
        first fragment by subtracting all of the other sizes. *)
     size: int;
+    extras : Extra.t list;
   }
 
   let get_req_gref c = Cstruct.LE.get_uint32 c 0
@@ -64,7 +65,7 @@ module Request = struct
     let flags = Flags.of_int (get_req_flags slot) in
     let id = get_req_id slot in
     let size = get_req_size slot in
-    Ok { gref; offset; flags; id; size }
+    Ok { gref; offset; flags; id; size; extras = [] }
 
   let flags t = t.flags
 

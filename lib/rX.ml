@@ -45,6 +45,7 @@ module Response = struct
     offset: int;
     flags: Flags.t;
     size: (int, error) result;
+    extras : Extra.t list;
   }
 
   let get_resp_id c = Cstruct.LE.get_uint16 c 0
@@ -72,7 +73,7 @@ module Response = struct
       match get_resp_status slot with
       | status when status > 0 -> Ok status
       | status -> Error status in
-    Ok { id; offset; flags; size }
+    Ok { id; offset; flags; size; extras = [] }
 
   let write t slot =
     set_resp_id slot t.id;

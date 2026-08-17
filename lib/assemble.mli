@@ -28,6 +28,15 @@ type fragment = {
 type packet = {
   total_size: int;
   fragments: fragment list;
+  extra_ids: int list;
+      (** Ring ids of slots consumed by extra_info descriptors. Such a slot cost
+          the reader whatever a slot costs, a page on the receive ring, but
+          carries no data and yields no fragment, so a caller that does not
+          release these leaks one per aggregated frame.
+
+          Derived by position, which is only sound where the reader assigned the
+          ids: valid for a frontend reading responses to its own requests, not
+          for a backend reading ids its peer chose. *)
 }
 
 type assembled = (packet, fragment list) result
@@ -36,8 +45,11 @@ type assembled = (packet, fragment list) result
     Reading never raises on peer-controlled data. *)
 
 module type IO = sig
-  val read_packets : ack_fn:((Cstruct.t -> unit) -> unit) -> assembled list
-  (** Drains the ring through [ack_fn], which hands over each slot in turn. *)
+  val read_packets :
+    with_extras:bool -> ack_fn:((Cstruct.t -> unit) -> unit) -> assembled list
+  (** Drains the ring through [ack_fn], which hands over each slot in turn.
+      [with_extras] says whether extra_info descriptors may follow a message,
+      which is only so once this end has advertised a feature that uses them. *)
 end
 
 module RX_IO : IO
