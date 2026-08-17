@@ -1,3 +1,7 @@
+## v2.1.8 (2026-08-17)
+* Merge backend and frontend (#118 @palainp, reviewed by @hannesm)
+* Add Generic Segmentation Offload (#119 @palainp, reviewed by @hannesm)
+
 ## v2.1.7 (2025-10-09)
 * read MTU from xenstore instead of using a hardcoded 1500 (#115 @hannesm,
   reviewed by @palainp)
