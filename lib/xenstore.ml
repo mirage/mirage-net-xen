@@ -373,6 +373,30 @@ module Make(Xs: Xs_client_lwt.S) = struct
           )
     )
 
+  (* init_backend writes InitWait unconditionally, which livelocks a reconnect:
+     a frontend still closing answers InitWait by writing Closing again. Wait for
+     it to be ready, as xen-netback does. *)
+  let wait_frontend_ready id =
+    frontend id
+    >>= fun frontend ->
+    Xs.make ()
+    >>= fun xsc ->
+    Xs.wait xsc (fun h ->
+        Lwt.catch
+          (fun () ->
+             Xs.read h (frontend / "state")
+             >>= fun state ->
+             let open Xen_os.Device_state in
+             match of_string state with
+             | Initialising | Initialised | Connected -> return ()
+             | Unknown | InitWait | Closing | Closed
+             | Reconfigured | Reconfiguring -> fail Xs_protocol.Eagain)
+          (function
+            | Xs_protocol.Enoent _ ->
+              fail (Xs_protocol.Error
+                      (Printf.sprintf "frontend %s has vanished" frontend))
+            | e -> fail e))
+
   let wait_for_frontend_closing id = frontend id >>= closing
   let wait_for_backend_closing id = backend id >>= closing
 

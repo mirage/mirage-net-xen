@@ -725,6 +725,8 @@ module Make(C: S.CONFIGURATION) = struct
        out of a frontend would need fragmenting, which don't-fragment forbids
        and which loses the packet. Revisit once the frontend can aggregate. *)
     let backend_features = { Features.supported with gso_tcpv4 = false } in
+    (* Gate before announcing InitWait; a first connection passes straight through. *)
+    C.wait_frontend_ready id >>= fun () ->
     C.init_backend id backend_features >>= fun _backend_configuration ->
     C.read_frontend_configuration id >>= fun f ->
     C.read_mtu id >>= fun mtu ->
