@@ -12,6 +12,9 @@ module Make (C : S.CONFIGURATION) : sig
   val connect : string -> t Lwt.t
 
   (* For Backend *)
-  val make_backend : domid:int -> device_id:int -> t Lwt.t
+  (* Fires once the connection is over and torn down. The vif still exists, so the
+     caller may connect again - that is how a guest that closes gets its network back. *)
+  val make_backend :
+    ?on_closed:(unit -> unit Lwt.t) -> domid:int -> device_id:int -> unit -> t Lwt.t
   val frontend_mac : t -> Macaddr.t
 end

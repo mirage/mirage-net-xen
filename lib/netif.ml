@@ -709,10 +709,14 @@ module Make(C: S.CONFIGURATION) = struct
       in
       Lwt.fail_with msg
 
-  let create_backend_device ~switch ~domid ~device_id =
+  let create_backend_device ?(on_closed = fun () -> Lwt.return_unit)
+      ~switch ~domid ~device_id () =
     let id = `Server (domid, device_id) in
     let cleanup = Cleanup.create () in
     Lwt_switch.add_hook (Some switch) (fun () -> Cleanup.perform cleanup);
+    (* Pushed first so it runs last: the caller learns the connection ended only
+       after the rings are unmapped and the close answered. *)
+    Cleanup.push cleanup on_closed;
     Cleanup.push cleanup (fun () -> C.disconnect_backend id);
     C.read_backend_mac id >>= fun mac ->
     C.read_frontend_mac id >>= fun frontend_mac ->
@@ -744,18 +748,29 @@ module Make(C: S.CONFIGURATION) = struct
     (* Last pushed, first performed: stop anyone touching the rings before they
        are unmapped. *)
     Cleanup.push cleanup (fun () -> transport.closed <- true; Lwt.return_unit);
+    (* Guarded: an escape here reaches async_exception_hook and exits the unikernel.
+       Turn the switch off anyway, or the rings stay mapped and on_closed never
+       fires. *)
     Lwt.async (fun () ->
-      C.wait_for_frontend_closing id >>= fun () ->
-      Log.info (fun f -> f "Frontend asked to close network device dom:%d/vif:%d"
-        domid device_id);
-      Lwt_switch.turn_off switch
-    );
+      Lwt.catch
+        (fun () ->
+          C.wait_for_frontend_closing id >>= fun () ->
+          Log.info (fun f -> f "Frontend asked to close network device dom:%d/vif:%d"
+            domid device_id);
+          Lwt_switch.turn_off switch)
+        (fun ex ->
+          Log.warn (fun f ->
+            f "[Backend] close-watch for dom:%d/vif:%d failed (%s); tearing down"
+              domid device_id (Printexc.to_string ex));
+          Lwt.catch
+            (fun () -> Lwt_switch.turn_off switch)
+            (fun _ -> Lwt.return_unit)));
     Lwt.return dev
 
-  let make_backend ~domid ~device_id =
+  let make_backend ?on_closed ~domid ~device_id () =
     let switch = Lwt_switch.create () in
     Lwt.catch
-      (fun () -> create_backend_device ~switch ~domid ~device_id)
+      (fun () -> create_backend_device ?on_closed ~switch ~domid ~device_id ())
       (fun ex -> Lwt_switch.turn_off switch >>= fun () -> Lwt.fail ex)
 
   (* Returns a thread that completes once the peer has answered for every

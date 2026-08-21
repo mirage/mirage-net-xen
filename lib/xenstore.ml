@@ -386,18 +386,45 @@ module Make(Xs: Xs_client_lwt.S) = struct
     ))
 
   (* See: https://github.com/mirage/xen/commit/546678c6a60f64fb186640460dfa69a837c8fba5 *)
+  (* Answer the close (Closing, then Closed once the frontend has) and park.
+     Never rm: the directory is the toolstack's, and a vanished backend reads as
+     hot-unplug to xenvif, which then permanently ejects the device. *)
   let disconnect_backend id =
     Xs.make ()
     >>= fun xsc ->
     backend id
     >>= fun path ->
-    Lwt.catch (fun () ->
-        Xs.(immediate xsc (fun h -> write h (path / "state") Xen_os.Device_state.(to_string Closed))) >>= fun _ ->
-        wait_for_frontend_closing id >>= fun () ->
-        Xs.(immediate xsc (fun h -> rm h path))
-      )
-      (fun ex ->
-         Log.warn (fun f -> f "XenStore error removing %S: %a" path Fmt.exn ex);
-         Lwt.return_unit
-      )
+    Lwt.catch
+      (fun () ->
+    (* Inside the guard: this read is Enoent exactly when the toolstack has
+       removed the directory, and an escape here kills the unikernel. *)
+    frontend id
+    >>= fun front ->
+    let write_state s =
+      Xs.(immediate xsc (fun h ->
+          write h (path / "state") (Xen_os.Device_state.to_string s))) in
+    let wait_frontend wanted =
+      Xs.wait xsc (fun h ->
+          Lwt.try_bind
+            (fun () -> Xs.read h (front / "state"))
+            (fun state ->
+               if List.mem (Xen_os.Device_state.of_string state) wanted
+               then return () else fail Xs_protocol.Eagain)
+            (function
+              | Xs_protocol.Enoent _ -> return ()  (* detached, or the domain died *)
+              | ex -> fail ex)) in
+         write_state Xen_os.Device_state.Closing >>= fun () ->
+         (* Closed is the clean finish. The others mean the frontend has already
+            begun a new cycle without finishing this one - stop waiting rather
+            than block the reconnect we are trying to enable. *)
+         wait_frontend Xen_os.Device_state.[ Closed; Initialising; Initialised; Connected ]
+         >>= fun () ->
+         write_state Xen_os.Device_state.Closed)
+      (function
+        | Xs_protocol.Enoent _ ->
+          (* The toolstack has already removed the device. Nothing to close. *)
+          Lwt.return_unit
+        | ex ->
+          Log.warn (fun f -> f "XenStore error closing %S: %a" path Fmt.exn ex);
+          Lwt.return_unit)
 end
