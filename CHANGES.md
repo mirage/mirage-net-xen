@@ -1,3 +1,18 @@
+## unreleased
+
+* backend: complete the vif xenbus state machine - answer the frontend's close cycle and re-arm
+  from it, instead of replying Eagain to every state but Initialised/Connected. A Windows
+  frontend normalises a device through a close cycle before it connects and cannot come up
+  otherwise (mirage/qubes-mirage-firewall#230).
+* backend: answer a runtime close (Closing, then Closed) and park, rather than writing Closed and
+  removing the backend directory - a vanished directory reads as hot-unplug to a Windows frontend
+  and permanently ejects the device. **BREAKING**: `make_backend` gains `?on_closed` and a
+  trailing `unit`, and `S.CONFIGURATION` gains `wait_frontend_ready`.
+* backend: do not announce InitWait to a frontend that is still closing, which livelocks a
+  reconnect.
+* backend: re-check `closed` on every RX ring op, so a listener parked at an await cannot touch
+  rings that teardown has unmapped.
+
 ## v2.1.8 (2026-08-17)
 * Merge backend and frontend (#118 @palainp, reviewed by @hannesm)
 * Add Generic Segmentation Offload (#119 @palainp, reviewed by @hannesm)

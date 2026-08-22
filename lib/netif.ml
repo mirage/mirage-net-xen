@@ -417,6 +417,8 @@ module Unified_TX_Ops = struct
 end
 
 module Unified_RX_Ops = struct
+  (* Every ring-touching RX op re-checks [closed]: rx_poll checks once on entry, then
+     awaits the callback, during which teardown can unmap the rings. *)
   let read_packets nf =
     check_open nf.t;
     match nf.t.ending with
@@ -439,6 +441,7 @@ module Unified_RX_Ops = struct
      error response leaks its page on the frontend, and leaves the peer waiting
      for an acknowledgement on the backend. *)
   let discard_fragments nf frags =
+    check_open nf.t;
     match nf.t.ending with
     | Front { rx_map ; _ } -> (* Frontend: the pages are ours, take them back *)
       frags |> Lwt_list.iter_s (fun frag ->
@@ -472,6 +475,7 @@ module Unified_RX_Ops = struct
      undone and the peer's transmit ring fills up and it stops sending. A NULL
      status is what says "nothing here". *)
   let release_extra_slots nf ids =
+    check_open nf.t;
     match nf.t.ending with
     | Front { rx_map ; _ } -> (* Frontend: the page is ours *)
       ids |> Lwt_list.iter_s (fun id ->
@@ -495,6 +499,7 @@ module Unified_RX_Ops = struct
      torn down straight after. That is what keeps the fragment from having to be
      copied to a buffer of its own first. *)
   let with_page nf frag read =
+    check_open nf.t;
     match nf.t.ending with
     | Front { rx_map ; _ } -> (* Frontend: the page is ours, found from the id *)
       let id = frag.Assemble.id in
@@ -532,6 +537,7 @@ module Unified_RX_Ops = struct
         | Ok () -> Lwt.return_unit)
 
   let notify_if_needed nf =
+    check_open nf.t;
     match nf.t.ending with
     | Front { rx_ring = ring, _ ; _ } -> (* Frontend pushes its refilled RX requests *)
       if Ring.Rpc.Front.push_requests_and_check_notify ring then
@@ -543,6 +549,7 @@ module Unified_RX_Ops = struct
   (* Frontend: hand the peer more pages to fill. Backend: bank the requests the
      peer has posted, so a later write has grants to copy into. *)
   let post_receive nf =
+    check_open nf.t;
     match nf.t.ending with
     | Front { rx_map ; rx_ring = ring, _ ; _ } ->
       let free_slots = Ring.Rpc.Front.get_free_requests ring in
@@ -875,10 +882,13 @@ module Make(C: S.CONFIGURATION) = struct
              finished, and would put the callback outside the catch below. The
              pages are already back in the pool, so waiting holds nothing. *)
           callback data
-        ) (fun ex ->
-          Log.err (fun f -> f "[%s-RX] Callback FAILED with exception: %s"
-            (direction nf) (Printexc.to_string ex));
-          Lwt.return_unit))
+        ) (function
+          (* Teardown raced this frame; listen's outer catch makes it a clean stop. *)
+          | Netback_shutdown as e -> Lwt.fail e
+          | ex ->
+            Log.err (fun f -> f "[%s-RX] Callback FAILED with exception: %s"
+              (direction nf) (Printexc.to_string ex));
+            Lwt.return_unit))
 
   let listen nf ~header_size:_ callback =
     let rec loop after =
