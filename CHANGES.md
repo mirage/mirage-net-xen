@@ -1,3 +1,9 @@
+## unreleased
+
+* backend: set NETRXF_data_validated on aggregated frames. Without it a peer that segments the
+  aggregate itself sees an invalid checksum on every segment; Linux hides this behind
+  netfront's rx_gso_checksum_fixup, measured firing on 86% of frames.
+
 ## v2.1.8 (2026-08-17)
 * Merge backend and frontend (#118 @palainp, reviewed by @hannesm)
 * Add Generic Segmentation Offload (#119 @palainp, reviewed by @hannesm)

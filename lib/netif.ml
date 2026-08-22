@@ -359,9 +359,16 @@ module Unified_TX_Ops = struct
               } in
               let has_more = (rest <> []) in
               let is_first = (offset = 0) in
+              (* NETRXF_data_validated: our checksum is complete, so the claim is honest.
+                 Load-bearing for a peer that segments the aggregate itself: xenvif copies
+                 the parent's TCP header into every segment and gates its one fresh
+                 per-segment checksum on this flag. Linux hides the omission via
+                 rx_gso_checksum_fixup. csum_blank is NOT set - it means a partial sum,
+                 which ours is not. Gated on use_gso, so other frames are unchanged. *)
               let flags =
                 Flags.((if has_more then more_data else empty)
-                       ++ (if is_first && use_gso then extra_info else empty))
+                       ++ (if is_first && use_gso then extra_info else empty)
+                       ++ (if use_gso then rx_data_validated else empty))
               in
               let slot = Ring.Rpc.Back.(slot rx_ring (next_res_id rx_ring)) in
               (* Each RX response carries the size of its own fragment. *)
