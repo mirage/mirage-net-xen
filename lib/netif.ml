@@ -533,7 +533,7 @@ module Unified_RX_Ops = struct
 
   let notify_if_needed nf =
     match nf.t.ending with
-    | Front { rx_ring = ring, _ ; _ } -> ()   (* post_receive pushes, it knows if anything was added *)
+    | Front _ -> ()   (* post_receive pushes, it knows if anything was added *)
     | Back { tx_ring ; _ } -> (* Backend pushes the TX responses it just wrote *)
       if Ring.Rpc.Back.push_responses_and_check_notify tx_ring then
         Xen_os.Eventchn.notify h nf.t.evtchn
