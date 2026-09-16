@@ -533,9 +533,7 @@ module Unified_RX_Ops = struct
 
   let notify_if_needed nf =
     match nf.t.ending with
-    | Front { rx_ring = ring, _ ; _ } -> (* Frontend pushes its refilled RX requests *)
-      if Ring.Rpc.Front.push_requests_and_check_notify ring then
-        Xen_os.Eventchn.notify h nf.t.evtchn
+    | Front _ -> ()   (* post_receive pushes, it knows if anything was added *)
     | Back { tx_ring ; _ } -> (* Backend pushes the TX responses it just wrote *)
       if Ring.Rpc.Back.push_responses_and_check_notify tx_ring then
         Xen_os.Eventchn.notify h nf.t.evtchn
@@ -565,6 +563,8 @@ module Unified_RX_Ops = struct
           Hashtbl.add rx_map id (gnt, page);
           RX.Request.(write {RX.Request.id; gref = Xen_os.Xen.Gntref.to_int32 gnt}) slot
         ) grants;
+        if Ring.Rpc.Front.push_requests_and_check_notify ring then
+          Xen_os.Eventchn.notify h nf.t.evtchn;
         Lwt.return_unit
     | Back { rx_grants ; rx_ring ; _ } ->
       (* backend_get_n_grefs drains the same way before it waits, so this only
