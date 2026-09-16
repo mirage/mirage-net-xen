@@ -15,3 +15,9 @@ module Make (C : S.CONFIGURATION) : sig
   val make_backend : domid:int -> device_id:int -> t Lwt.t
   val frontend_mac : t -> Macaddr.t
 end
+
+type t
+
+include Mirage_net.S with type t := t
+val connect : string -> t Lwt.t
+val max_frame_size : t -> int

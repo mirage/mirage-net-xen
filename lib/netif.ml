@@ -917,3 +917,19 @@ module Make(C: S.CONFIGURATION) = struct
       nf.t.closed <- true;
       Lwt.return_unit
 end
+
+(* Mirage's [network] device emits Netif (and uses connect), so exposes it as
+   netif.ml did up to 2.1.7 *)
+module Root = Make (Xenstore.Make (Xen_os.Xs))
+
+type error = Root.error
+let pp_error = Root.pp_error
+let connect = Root.connect
+let disconnect = Root.disconnect
+let write = Root.write
+let listen = Root.listen
+let mac = Root.mac
+let mtu = Root.mtu
+let get_stats_counters = Root.get_stats_counters
+let reset_stats_counters = Root.reset_stats_counters
+let max_frame_size = Root.max_frame_size
