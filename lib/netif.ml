@@ -417,6 +417,8 @@ module Unified_TX_Ops = struct
 end
 
 module Unified_RX_Ops = struct
+  (* Every ring-touching RX op re-checks [closed]: rx_poll checks once on entry, then
+     awaits the callback, during which teardown can unmap the rings. *)
   let read_packets nf =
     check_open nf.t;
     match nf.t.ending with
@@ -439,6 +441,7 @@ module Unified_RX_Ops = struct
      error response leaks its page on the frontend, and leaves the peer waiting
      for an acknowledgement on the backend. *)
   let discard_fragments nf frags =
+    check_open nf.t;
     match nf.t.ending with
     | Front { rx_map ; _ } -> (* Frontend: the pages are ours, take them back *)
       frags |> Lwt_list.iter_s (fun frag ->
@@ -472,6 +475,7 @@ module Unified_RX_Ops = struct
      undone and the peer's transmit ring fills up and it stops sending. A NULL
      status is what says "nothing here". *)
   let release_extra_slots nf ids =
+    check_open nf.t;
     match nf.t.ending with
     | Front { rx_map ; _ } -> (* Frontend: the page is ours *)
       ids |> Lwt_list.iter_s (fun id ->
@@ -495,6 +499,7 @@ module Unified_RX_Ops = struct
      torn down straight after. That is what keeps the fragment from having to be
      copied to a buffer of its own first. *)
   let with_page nf frag read =
+    check_open nf.t;
     match nf.t.ending with
     | Front { rx_map ; _ } -> (* Frontend: the page is ours, found from the id *)
       let id = frag.Assemble.id in
@@ -532,6 +537,7 @@ module Unified_RX_Ops = struct
         | Ok () -> Lwt.return_unit)
 
   let notify_if_needed nf =
+    check_open nf.t;
     match nf.t.ending with
     | Front _ -> ()   (* post_receive pushes, it knows if anything was added *)
     | Back { tx_ring ; _ } -> (* Backend pushes the TX responses it just wrote *)
@@ -541,6 +547,7 @@ module Unified_RX_Ops = struct
   (* Frontend: hand the peer more pages to fill. Backend: bank the requests the
      peer has posted, so a later write has grants to copy into. *)
   let post_receive nf =
+    check_open nf.t;
     match nf.t.ending with
     | Front { rx_map ; rx_ring = ring, _ ; _ } ->
       let free_slots = Ring.Rpc.Front.get_free_requests ring in
@@ -709,10 +716,14 @@ module Make(C: S.CONFIGURATION) = struct
       in
       Lwt.fail_with msg
 
-  let create_backend_device ~switch ~domid ~device_id =
+  let create_backend_device ?(on_closed = fun () -> Lwt.return_unit)
+      ~switch ~domid ~device_id () =
     let id = `Server (domid, device_id) in
     let cleanup = Cleanup.create () in
     Lwt_switch.add_hook (Some switch) (fun () -> Cleanup.perform cleanup);
+    (* Pushed first so it runs last: the caller learns the connection ended only
+       after the rings are unmapped and the close answered. *)
+    Cleanup.push cleanup on_closed;
     Cleanup.push cleanup (fun () -> C.disconnect_backend id);
     C.read_backend_mac id >>= fun mac ->
     C.read_frontend_mac id >>= fun frontend_mac ->
@@ -721,6 +732,8 @@ module Make(C: S.CONFIGURATION) = struct
        out of a frontend would need fragmenting, which don't-fragment forbids
        and which loses the packet. Revisit once the frontend can aggregate. *)
     let backend_features = { Features.supported with gso_tcpv4 = false } in
+    (* Gate before announcing InitWait; a first connection passes straight through. *)
+    C.wait_frontend_ready id >>= fun () ->
     C.init_backend id backend_features >>= fun _backend_configuration ->
     C.read_frontend_configuration id >>= fun f ->
     C.read_mtu id >>= fun mtu ->
@@ -744,18 +757,29 @@ module Make(C: S.CONFIGURATION) = struct
     (* Last pushed, first performed: stop anyone touching the rings before they
        are unmapped. *)
     Cleanup.push cleanup (fun () -> transport.closed <- true; Lwt.return_unit);
+    (* Guarded: an escape here reaches async_exception_hook and exits the unikernel.
+       Turn the switch off anyway, or the rings stay mapped and on_closed never
+       fires. *)
     Lwt.async (fun () ->
-      C.wait_for_frontend_closing id >>= fun () ->
-      Log.info (fun f -> f "Frontend asked to close network device dom:%d/vif:%d"
-        domid device_id);
-      Lwt_switch.turn_off switch
-    );
+      Lwt.catch
+        (fun () ->
+          C.wait_for_frontend_closing id >>= fun () ->
+          Log.info (fun f -> f "Frontend asked to close network device dom:%d/vif:%d"
+            domid device_id);
+          Lwt_switch.turn_off switch)
+        (fun ex ->
+          Log.warn (fun f ->
+            f "[Backend] close-watch for dom:%d/vif:%d failed (%s); tearing down"
+              domid device_id (Printexc.to_string ex));
+          Lwt.catch
+            (fun () -> Lwt_switch.turn_off switch)
+            (fun _ -> Lwt.return_unit)));
     Lwt.return dev
 
-  let make_backend ~domid ~device_id =
+  let make_backend ?on_closed ~domid ~device_id () =
     let switch = Lwt_switch.create () in
     Lwt.catch
-      (fun () -> create_backend_device ~switch ~domid ~device_id)
+      (fun () -> create_backend_device ?on_closed ~switch ~domid ~device_id ())
       (fun ex -> Lwt_switch.turn_off switch >>= fun () -> Lwt.fail ex)
 
   (* Returns a thread that completes once the peer has answered for every
@@ -858,10 +882,13 @@ module Make(C: S.CONFIGURATION) = struct
              finished, and would put the callback outside the catch below. The
              pages are already back in the pool, so waiting holds nothing. *)
           callback data
-        ) (fun ex ->
-          Log.err (fun f -> f "[%s-RX] Callback FAILED with exception: %s"
-            (direction nf) (Printexc.to_string ex));
-          Lwt.return_unit))
+        ) (function
+          (* Teardown raced this frame; listen's outer catch makes it a clean stop. *)
+          | Netback_shutdown as e -> Lwt.fail e
+          | ex ->
+            Log.err (fun f -> f "[%s-RX] Callback FAILED with exception: %s"
+              (direction nf) (Printexc.to_string ex));
+            Lwt.return_unit))
 
   let listen nf ~header_size:_ callback =
     let rec loop after =
