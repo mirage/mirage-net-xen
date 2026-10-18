@@ -64,6 +64,10 @@ module type CONFIGURATION = sig
 
   val read_backend: id -> backend_configuration Lwt.t
 
+  (* Blocks until the frontend is ready, so a reconnect does not announce InitWait
+     into a frontend that is still closing. *)
+  val wait_frontend_ready: id -> unit Lwt.t
+
   val init_backend: id -> Features.t -> backend_configuration Lwt.t
   (** Initialise the configuration for a new backend. *)
 

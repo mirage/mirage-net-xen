@@ -160,27 +160,68 @@ module Make(Xs: Xs_client_lwt.S) = struct
   let read_frontend_configuration id =
     frontend id
     >>= fun frontend ->
+    backend id
+    >>= fun backend ->
     Xs.make ()
     >>= fun xsc ->
-    Xs.wait xsc (fun h ->
-      Lwt.catch
-        (fun () ->
-          Xs.read h (frontend / "state")
-          >>= fun state ->
-          let open Xen_os.Device_state in
-          match of_string state with
-          | Initialised | Connected -> return ()
-          | Unknown
-          | Initialising
-          | InitWait
-          | Closing
-          | Closed        (* XXX: stop waiting? *)
-          | Reconfigured  (* XXX: stop waiting? *)
-          | Reconfiguring -> fail Xs_protocol.Eagain
-        ) (function
-          | Xs_protocol.Enoent _ -> fail Xs_protocol.Eagain
-          | e -> fail e)
-    ) >>= fun () ->
+    let write_backend_state s =
+      Xs.(immediate xsc (fun h ->
+        write h (backend / "state") (Xen_os.Device_state.to_string s))) in
+    (* Wait for the frontend to reach one of [wanted]; a vanished directory means
+       the device is gone for good, so fail rather than wait for ever. *)
+    let wait_frontend wanted =
+      Xs.wait xsc (fun h ->
+        Lwt.catch
+          (fun () ->
+            Xs.read h (frontend / "state")
+            >>= fun state ->
+            let s = Xen_os.Device_state.of_string state in
+            if List.mem s wanted then return s else fail Xs_protocol.Eagain)
+          (function
+            | Xs_protocol.Enoent _ ->
+              fail (Xs_protocol.Error
+                      (Printf.sprintf "frontend %s has vanished" frontend))
+            | e -> fail e)) in
+    (* Backend half of the vif state machine, mirroring xen-netback's
+       frontend_changed(). Waiting only for Initialised|Connected cannot bring up
+       a Windows frontend: xenvif normalises through a CLOSE CYCLE first and spins
+       at DISPATCH_LEVEL until the backend answers it (#230). *)
+    let open Xen_os.Device_state in
+    let rec handshake () =
+      wait_frontend [ Initialised; Connected; Closing; Closed ]
+      >>= function
+      | Initialised | Connected ->
+        (* The ring refs and event channel are committed in one transaction
+           before the frontend announces either state, so they are readable. *)
+        return ()
+      | Closing ->
+        (* Edge-triggered: wait for the state to CHANGE. Recursing into a list
+             still containing Closing spins, and device/vif/N/state is
+             guest-writable. *)
+        write_backend_state Closing >>= fun () ->
+        wait_frontend [ Closed; Initialising; Initialised; Connected ]
+        >>= (function
+          | Initialising ->
+            (* The frontend abandoned the close and started a new cycle. Walk the
+               backend out the way xen-netback's set_backend_state does rather
+               than leaving it parked at Closing, which the frontend would wait
+               on for ever. *)
+            write_backend_state Closed >>= fun () ->
+            write_backend_state InitWait >>= fun () -> handshake ()
+          | _ -> handshake ())
+      | Closed ->
+        write_backend_state Closed >>= fun () ->
+        (* Close cycle done. The frontend leaves Closed by writing Initialising
+           when it starts the device for real. Re-arm at InitWait only AFTER it
+           has left Closed - answering earlier lets its close loop observe
+           InitWait and start the cycle again. *)
+        wait_frontend [ Initialising; Initialised; Connected ]
+        >>= fun _ ->
+        write_backend_state InitWait >>= fun () -> handshake ()
+      | _ -> handshake ()
+    in
+    handshake ()
+    >>= fun () ->
     Xs.(immediate xsc
       (fun h ->
         read h (frontend / "tx-ring-ref")
@@ -332,6 +373,30 @@ module Make(Xs: Xs_client_lwt.S) = struct
           )
     )
 
+  (* init_backend writes InitWait unconditionally, which livelocks a reconnect:
+     a frontend still closing answers InitWait by writing Closing again. Wait for
+     it to be ready, as xen-netback does. *)
+  let wait_frontend_ready id =
+    frontend id
+    >>= fun frontend ->
+    Xs.make ()
+    >>= fun xsc ->
+    Xs.wait xsc (fun h ->
+        Lwt.catch
+          (fun () ->
+             Xs.read h (frontend / "state")
+             >>= fun state ->
+             let open Xen_os.Device_state in
+             match of_string state with
+             | Initialising | Initialised | Connected -> return ()
+             | Unknown | InitWait | Closing | Closed
+             | Reconfigured | Reconfiguring -> fail Xs_protocol.Eagain)
+          (function
+            | Xs_protocol.Enoent _ ->
+              fail (Xs_protocol.Error
+                      (Printf.sprintf "frontend %s has vanished" frontend))
+            | e -> fail e))
+
   let wait_for_frontend_closing id = frontend id >>= closing
   let wait_for_backend_closing id = backend id >>= closing
 
@@ -345,18 +410,45 @@ module Make(Xs: Xs_client_lwt.S) = struct
     ))
 
   (* See: https://github.com/mirage/xen/commit/546678c6a60f64fb186640460dfa69a837c8fba5 *)
+  (* Answer the close (Closing, then Closed once the frontend has) and park.
+     Never rm: the directory is the toolstack's, and a vanished backend reads as
+     hot-unplug to xenvif, which then permanently ejects the device. *)
   let disconnect_backend id =
     Xs.make ()
     >>= fun xsc ->
     backend id
     >>= fun path ->
-    Lwt.catch (fun () ->
-        Xs.(immediate xsc (fun h -> write h (path / "state") Xen_os.Device_state.(to_string Closed))) >>= fun _ ->
-        wait_for_frontend_closing id >>= fun () ->
-        Xs.(immediate xsc (fun h -> rm h path))
-      )
-      (fun ex ->
-         Log.warn (fun f -> f "XenStore error removing %S: %a" path Fmt.exn ex);
-         Lwt.return_unit
-      )
+    Lwt.catch
+      (fun () ->
+    (* Inside the guard: this read is Enoent exactly when the toolstack has
+       removed the directory, and an escape here kills the unikernel. *)
+    frontend id
+    >>= fun front ->
+    let write_state s =
+      Xs.(immediate xsc (fun h ->
+          write h (path / "state") (Xen_os.Device_state.to_string s))) in
+    let wait_frontend wanted =
+      Xs.wait xsc (fun h ->
+          Lwt.try_bind
+            (fun () -> Xs.read h (front / "state"))
+            (fun state ->
+               if List.mem (Xen_os.Device_state.of_string state) wanted
+               then return () else fail Xs_protocol.Eagain)
+            (function
+              | Xs_protocol.Enoent _ -> return ()  (* detached, or the domain died *)
+              | ex -> fail ex)) in
+         write_state Xen_os.Device_state.Closing >>= fun () ->
+         (* Closed is the clean finish. The others mean the frontend has already
+            begun a new cycle without finishing this one - stop waiting rather
+            than block the reconnect we are trying to enable. *)
+         wait_frontend Xen_os.Device_state.[ Closed; Initialising; Initialised; Connected ]
+         >>= fun () ->
+         write_state Xen_os.Device_state.Closed)
+      (function
+        | Xs_protocol.Enoent _ ->
+          (* The toolstack has already removed the device. Nothing to close. *)
+          Lwt.return_unit
+        | ex ->
+          Log.warn (fun f -> f "XenStore error closing %S: %a" path Fmt.exn ex);
+          Lwt.return_unit)
 end
