@@ -283,7 +283,11 @@ module Unified_TX_Ops = struct
                 (* The first request announces the whole frame, the others
                    their own fragment. *)
                 let request_size = if is_first && nfrags > 1 then size else len in
-                let flags = if has_more then Flags.more_data else Flags.empty in
+                (* Convention for for the library: the data_validated flag is passed
+                   so the checksums should be correctly set in [data]. We make also
+                   the same hypothesis below for the backend, and in write_single_block. *)
+                let flags = Flags.(tx_data_validated
+                                   ++ (if has_more then Flags.more_data else Flags.empty)) in
                 let request = { TX.Request.id; gref = Xen_os.Xen.Gntref.to_int32 gref;
                                 offset = shared_block.Cstruct.off; flags;
                                 size = request_size; extras = [] } in
@@ -359,8 +363,11 @@ module Unified_TX_Ops = struct
               } in
               let has_more = (rest <> []) in
               let is_first = (offset = 0) in
+              (* Convention for for the library: the data_validated flag is passed
+                 so the checksums should be correctly set in [data]. *)
               let flags =
-                Flags.((if has_more then more_data else empty)
+                Flags.(rx_data_validated
+                       ++ (if has_more then more_data else empty)
                        ++ (if is_first && use_gso then extra_info else empty))
               in
               let slot = Ring.Rpc.Back.(slot rx_ring (next_res_id rx_ring)) in
@@ -395,9 +402,11 @@ module Unified_TX_Ops = struct
             id; offset = shared_block.Cstruct.off; size = len;
             gref = Xen_os.Xen.Gntref.to_int32 gref;
           } in
+          (* Convention for for the library: the data_validated flag is passed
+             so the checksums should be correctly set in by the caller [fillf]. *)
           let request = { TX.Request.id; gref = Xen_os.Xen.Gntref.to_int32 gref;
                           offset = shared_block.Cstruct.off;
-                          flags = Flags.empty; size = len; extras = [] } in
+                          flags = Flags.tx_data_validated; size = len; extras = [] } in
           Lwt_ring.Front.write client (fun slot ->
               TX.Request.write request slot; id
             ) >>= fun replied ->
