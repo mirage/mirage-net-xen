@@ -1,3 +1,8 @@
+## v2.1.9 (2026-10-28)
+* Do not notify the backend when no RX request was added, otherwise the CPU burns (#124 @palainp, reviewed by @hannesm)
+* Expose the mirage_net interface as it was up to 2.1.7 (#125 @palainp, reviewed by @hannesm)
+* Advertise the packet checksums are verified by upper layers (#126 @arkenoi, @hannesm, @palainp)
+
 ## v2.1.8 (2026-08-17)
 * Merge backend and frontend (#118 @palainp, reviewed by @hannesm)
 * Add Generic Segmentation Offload (#119 @palainp, reviewed by @hannesm)
